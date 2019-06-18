@@ -99,17 +99,32 @@ class NodeControl extends Component {
     this.state = {
       automatic: true
     }
+    this.processing = false
     this.switchProcessing = this.switchProcessing.bind(this)
   }
   
 
   handleProcess(e) {
-    fetch("/node/"+this.props.node+"/process")
-      .then(() => this.props.update())
-      .catch(function(error) {
-        console.log(error);
-        alert(error);
-      });
+    if(this.processing === true) {
+      return
+    }
+    this.processing = true;
+    let delay = this.state.automatic
+    if(this.state.automatic === "manual")  {
+      delay = 0
+    }
+
+    setTimeout(() => {
+      fetch("/node/"+this.props.node+"/process")
+        .then(() => {
+          this.processing = false
+          this.props.update();
+        })
+        .catch(function(error) {
+          console.log(error);
+          alert(error);
+        });
+    }, delay)
   }
 
   handlePropose(e) {
@@ -124,18 +139,12 @@ class NodeControl extends Component {
   }
 
   switchProcessing(e) {
-    this.setState({automatic: e.target.value === "true"})
-console.log("switching state for node "+this.props.node+" to "+e.target.value)
+    this.setState({automatic: e.target.value})
   }
 
   render() {
-    if(this.state.automatic === true) {
-      console.log("automatically processing for "+this.props.node+" as "+this.state.automatic)
-      if(this.props.actions.total > 0) {
-        this.handleProcess(null)
-      }
-    } else {
-      console.log("NOT automatically processing for "+this.props.node+" as "+this.state.automatic)
+    if(this.props.actions.total > 0 && this.state.automatic != "manual") {
+      this.handleProcess(null)
     }
 
     return <Card>
@@ -160,8 +169,11 @@ console.log("switching state for node "+this.props.node+" to "+e.target.value)
           <Form.Group>
             <Form.Label id='auto'>Processing </Form.Label>
             <Form.Control as="select" onChange={this.switchProcessing}>
-              <option value="true">Automatic</option>
-              <option value="false">Manual</option>
+              <option value="0">Automatic (immediate)</option>
+              <option value="50">Automatic (50ms delay)</option>
+              <option value="500">Automatic (500ms delay)</option>
+              <option value="1500">Automatic (1500ms delay)</option>
+              <option value="manual">Manual</option>
             </Form.Control>
           </Form.Group>
         </Form>
@@ -175,6 +187,7 @@ console.log("switching state for node "+this.props.node+" to "+e.target.value)
 class App extends Component {
   constructor(props) {
     super(props);
+    this.refreshing = false
     this.state = {
       node0: {
           actions: {},
@@ -191,7 +204,8 @@ class App extends Component {
       node3: {
           actions: {},
           stateMachine: {}
-      }
+      },
+      refreshing: false
     };
   
     this.updateStatus = this.updateStatus.bind(this);
@@ -199,10 +213,15 @@ class App extends Component {
   }
 
   updateStatus() {
+    if( this.refreshing === true) {
+      return
+    }
+    this.refreshing= true
     fetch("/status")
       .then(response => response.json())
       .then(nodeStatuses => {
         this.setState(nodeStatuses);
+        this.refreshing = false
       })
       .catch(function(error) {
         console.log(error);
