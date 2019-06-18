@@ -42,6 +42,16 @@ func (a *Actions) IsEmpty() bool {
 		len(a.Checkpoint) == 0
 }
 
+func (a *Actions) Length() int {
+	return len(a.Broadcast) +
+		len(a.Unicast) +
+		len(a.Preprocess) +
+		len(a.Digest) +
+		len(a.Validate) +
+		len(a.Commit) +
+		len(a.Checkpoint)
+}
+
 func (a *Actions) Append(o *Actions) {
 	a.Broadcast = append(a.Broadcast, o.Broadcast...)
 	a.Unicast = append(a.Unicast, o.Unicast...)

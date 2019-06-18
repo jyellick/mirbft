@@ -4,6 +4,7 @@ go 1.12
 
 require (
 	github.com/golang/protobuf v1.2.0
+	github.com/gorilla/mux v1.7.2
 	github.com/ibm/mirbft v0.0.0-20190415184034-d1829758e6fc
 	github.com/onsi/ginkgo v1.8.0
 	github.com/onsi/gomega v1.5.0
