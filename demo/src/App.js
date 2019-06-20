@@ -1,6 +1,7 @@
 import React, { Component } from 'react';
 
 import Card from 'react-bootstrap/Card'
+import Collapse from 'react-bootstrap/Collapse'
 import Form from 'react-bootstrap/Form'
 import Container from 'react-bootstrap/Container'
 import Row from 'react-bootstrap/Row'
@@ -9,8 +10,16 @@ import Table from 'react-bootstrap/Table'
 import Button from 'react-bootstrap/Button'
 
 class StatusTable extends Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      collapsed: true
+    }
+  }
+
   createTable() {
-    let nodeStatus = this.props.node;
+    let obj = this
+    let nodeStatus = this.props.nodeStatus;
 
     let table = [];
 
@@ -28,7 +37,9 @@ class StatusTable extends Component {
       nodeStatus.Buckets.forEach(function(bucket) {
         let row = [];
         if(first) {
-          row.push(<td rowSpan={nodeStatus.Buckets.length}>State Machine</td>);
+          row.push(<td rowSpan={nodeStatus.Buckets.length} style={{verticalAlign:"middle"}}>
+            <Button onClick={() => {obj.setState({collapsed: !obj.state.collapsed})}} aria-controls="{obj.props.node}-msg" aria-expanded="{!obj.state.collapsed}">Node-{obj.props.node} State Machine</Button>
+          </td>);
           first = false;
         }
         row.push(<td>Bucket-{bucket.ID}</td>)
@@ -80,7 +91,7 @@ class StatusTable extends Component {
           }
           section.push(<tr>{row}</tr>);
         });
-        table.push(<tbody style={{border:"solid black 3px"}}>{section}</tbody>)
+        table.push(<Collapse id="{obj.props.node}-msgs" in={!obj.state.collapsed}><tbody style={{border:"solid black 3px"}}>{section}</tbody></Collapse>)
       });
     }
 
@@ -241,7 +252,10 @@ class App extends Component {
               <Col><NodeControl node="2" actions={this.state.node2.actions} update={this.updateStatus}/></Col>
               <Col><NodeControl node="3" actions={this.state.node3.actions} update={this.updateStatus}/></Col>
             </Row>
-            <Row><Col> <StatusTable node={this.state.node0.stateMachine}/> </Col></Row>
+            <Row><Col> <StatusTable node="0" nodeStatus={this.state.node0.stateMachine}/> </Col></Row>
+            <Row><Col> <StatusTable node="1" nodeStatus={this.state.node1.stateMachine}/> </Col></Row>
+            <Row><Col> <StatusTable node="2" nodeStatus={this.state.node2.stateMachine}/> </Col></Row>
+            <Row><Col> <StatusTable node="3" nodeStatus={this.state.node3.stateMachine}/> </Col></Row>
           </Container>
         </header>
       </div>
