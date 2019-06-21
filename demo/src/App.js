@@ -1,7 +1,7 @@
 import React, { Component } from 'react';
 
 import Card from 'react-bootstrap/Card'
-import Collapse from 'react-bootstrap/Collapse'
+ // import Collapse from 'react-bootstrap/Collapse'
 import Form from 'react-bootstrap/Form'
 import Container from 'react-bootstrap/Container'
 import Row from 'react-bootstrap/Row'
@@ -9,7 +9,8 @@ import Col from 'react-bootstrap/Col'
 import Table from 'react-bootstrap/Table'
 import Button from 'react-bootstrap/Button'
 
-class StatusTable extends Component {
+/*
+class NodeStatusTableData extends Component {
   constructor(props) {
     super(props);
     this.state = {
@@ -23,13 +24,6 @@ class StatusTable extends Component {
 
     let table = [];
 
-    let headers = [];
-    headers.push(<th colSpan="2"></th>)
-    for(let i = nodeStatus.LowWatermark ; i <= nodeStatus.HighWatermark ; i++) {
-      headers.push(<th>{i}</th>);
-    }
-
-    table.push(<thead><tr>{headers}</tr></thead>);
 
     if(nodeStatus.Buckets != null) {
       let section = [];
@@ -97,9 +91,92 @@ class StatusTable extends Component {
 
     return table;
   }
+}
+*/
 
+class SequenceHeaders extends Component {
   render() {
-    return <Table bordered size="sm">{this.createTable()}</Table>
+    return <thead>
+      <tr>
+        <th colSpan="2" key="unused"></th>
+        {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
+          return <th key={"header-"+i}>{i+this.props.lowWatermark}</th>;
+        })}
+      </tr>
+    </thead>
+  }
+}
+
+class SequenceStatusRow extends Component {
+  render() {
+    let count = 0;
+
+    return <tr>
+      {(() => {if(this.props.bucket.ID === 0) {
+        return <td rowSpan={this.props.numBuckets} style={{verticalAlign:"middle"}}>
+          <Button>Node-{this.props.nodeID} State Machine</Button>
+        </td>
+      }})()}
+
+      <td>Bucket-{this.props.bucket.ID}</td>
+
+      {[...Array(this.props.offset).keys()].map((i) => {
+          return <td key={"offset-"+i} style={{background:"black"}}></td>;
+      })}
+
+      {
+        this.props.bucket.Sequences.map((sequence) => {
+        count++;
+        if(sequence === 0){
+          return <td key={count}></td>;
+        } else if(sequence === 1){
+          return <td  key={count} style={{background:"yellow"}}>Q</td>;
+        } else if(sequence === 2){
+          return <td  key={count} style={{background:"yellow"}}>D</td>;
+        } else if(sequence === 3){
+          return <td  key={count} style={{background:"red"}}>I</td>;
+        } else if(sequence === 4){
+          return <td  key={count} style={{background:"yellow"}}>V</td>;
+        } else if(sequence === 5){
+          return <td  key={count} style={{background:"yellow"}}>P</td>;
+        } else if(sequence === 6){
+          return <td  key={count} style={{background:"green"}}>C</td>;
+        } else {
+          return <td key={count}>?</td>
+        }
+      })}
+
+      {[...Array(this.props.padding).keys()].map((i) => {
+        return <td key={"padding-"+i} style={{background:"gray"}}></td>
+      })}
+    </tr>
+  }
+}
+
+class SequenceStatusBody extends Component {
+  render() {
+    return <tbody style={{border:"solid black 3px"}}>
+      {this.props.buckets.map((bucket) => {
+        return <SequenceStatusRow key={"node-"+this.props.nodeID+"-"+bucket.ID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} numBuckets={this.props.buckets.length} nodeID={this.props.nodeID}/>
+      })}
+    </tbody>
+  }
+}
+
+class StatusTable extends Component {
+  render() {
+    let lowWatermark = Math.min(...(this.props.nodes.map((i) => {return i.stateMachine.LowWatermark})))
+    let highWatermark = Math.max(...(this.props.nodes.map((i) => {return i.stateMachine.HighWatermark})))
+    if(highWatermark <= lowWatermark) {
+      return null
+    }
+
+    return <Table bordered size="sm">
+       <SequenceHeaders lowWatermark={lowWatermark} highWatermark={highWatermark} />
+       {this.props.nodes.map((node) => {
+         return <SequenceStatusBody key={"node-"+node.ID} nodeID={node.ID} buckets={node.stateMachine.Buckets} offset={node.stateMachine.LowWatermark - lowWatermark} padding={highWatermark - node.stateMachine.HighWatermark } />
+       })}
+    </Table>
   }
 }
 
@@ -154,16 +231,15 @@ class NodeControl extends Component {
   }
 
   render() {
-    if(this.props.actions.total > 0 && this.state.automatic != "manual") {
+    if(this.props.actions.total > 0 && this.state.automatic !== "manual") {
       this.handleProcess(null)
     }
 
     return <Card>
       <Card.Body>
         <Card.Title>Node {this.props.node}</Card.Title>
-        <Card.Text>
           <Table size="sm">
-              <thead><th>Action</th><th>Outstanding</th></thead>
+              <thead><tr><th>Action</th><th>Outstanding</th></tr></thead>
               <tbody>
                 <tr><td>Broadcasts</td><td>{this.props.actions.broadcast}</td></tr>
                 <tr><td>Unicasts</td><td>{this.props.actions.unicast}</td></tr>
@@ -175,7 +251,6 @@ class NodeControl extends Component {
                 <tr style={{fontWeight:"bold"}}><td>Total</td><td>{this.props.actions.total}</td></tr>
               </tbody>
           </Table>
-        </Card.Text>
         <Form>
           <Form.Group>
             <Form.Label id='auto'>Processing </Form.Label>
@@ -198,29 +273,14 @@ class NodeControl extends Component {
 class App extends Component {
   constructor(props) {
     super(props);
-    this.refreshing = false
+    this.refreshing = false;
     this.state = {
-      node0: {
-          actions: {},
-          stateMachine: {}
-      },
-      node1: {
-          actions: {},
-          stateMachine: {}
-      },
-      node2: {
-          actions: {},
-          stateMachine: {}
-      },
-      node3: {
-          actions: {},
-          stateMachine: {}
-      },
+      nodes: [],
       refreshing: false
     };
   
     this.updateStatus = this.updateStatus.bind(this);
-    this.updateStatus(0)
+    this.updateStatus(0);
   }
 
   updateStatus() {
@@ -231,7 +291,9 @@ class App extends Component {
     fetch("/status")
       .then(response => response.json())
       .then(nodeStatuses => {
-        this.setState(nodeStatuses);
+        this.setState({
+          nodes: nodeStatuses
+        });
         this.refreshing = false
       })
       .catch(function(error) {
@@ -247,15 +309,11 @@ class App extends Component {
           <Container className="m-1">
             <Row><Col><h1>MirBFT Status</h1></Col></Row>
             <Row>
-              <Col><NodeControl node="0" actions={this.state.node0.actions} update={this.updateStatus}/></Col>
-              <Col><NodeControl node="1" actions={this.state.node1.actions} update={this.updateStatus}/></Col>
-              <Col><NodeControl node="2" actions={this.state.node2.actions} update={this.updateStatus}/></Col>
-              <Col><NodeControl node="3" actions={this.state.node3.actions} update={this.updateStatus}/></Col>
+              {this.state.nodes.map((node) => {
+                return <Col key={"node-"+node.ID}><NodeControl key={"node-"+node.ID} node={node.ID} actions={node.actions} update={this.updateStatus}/></Col>
+              })}
             </Row>
-            <Row><Col> <StatusTable node="0" nodeStatus={this.state.node0.stateMachine}/> </Col></Row>
-            <Row><Col> <StatusTable node="1" nodeStatus={this.state.node1.stateMachine}/> </Col></Row>
-            <Row><Col> <StatusTable node="2" nodeStatus={this.state.node2.stateMachine}/> </Col></Row>
-            <Row><Col> <StatusTable node="3" nodeStatus={this.state.node3.stateMachine}/> </Col></Row>
+            <Row><Col> <StatusTable nodes={this.state.nodes}/> </Col></Row>
           </Container>
         </header>
       </div>

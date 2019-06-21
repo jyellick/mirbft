@@ -172,7 +172,7 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	de.Mutex.Lock()
 	defer de.Mutex.Unlock()
 
-	nodeStatuses := map[string]interface{}{}
+	nodeStatuses := []map[string]interface{}{}
 	for i, demoNode := range de.DemoNodes {
 		select {
 		case actions := <-demoNode.Node.Ready():
@@ -208,7 +208,9 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 
 		nodeStatus["stateMachine"] = statusAsMap
 
-		nodeStatuses[fmt.Sprintf("node%d", i)] = nodeStatus
+		nodeStatus["ID"] = i
+
+		nodeStatuses = append(nodeStatuses, nodeStatus)
 	}
 
 	bytes, err := json.Marshal(nodeStatuses)
