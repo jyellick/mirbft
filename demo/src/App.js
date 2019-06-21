@@ -1,98 +1,13 @@
 import React, { Component } from 'react';
 
 import Card from 'react-bootstrap/Card'
- // import Collapse from 'react-bootstrap/Collapse'
+import Collapse from 'react-bootstrap/Collapse'
 import Form from 'react-bootstrap/Form'
 import Container from 'react-bootstrap/Container'
 import Row from 'react-bootstrap/Row'
 import Col from 'react-bootstrap/Col'
 import Table from 'react-bootstrap/Table'
 import Button from 'react-bootstrap/Button'
-
-/*
-class NodeStatusTableData extends Component {
-  constructor(props) {
-    super(props);
-    this.state = {
-      collapsed: true
-    }
-  }
-
-  createTable() {
-    let obj = this
-    let nodeStatus = this.props.nodeStatus;
-
-    let table = [];
-
-
-    if(nodeStatus.Buckets != null) {
-      let section = [];
-      let first = true
-      nodeStatus.Buckets.forEach(function(bucket) {
-        let row = [];
-        if(first) {
-          row.push(<td rowSpan={nodeStatus.Buckets.length} style={{verticalAlign:"middle"}}>
-            <Button onClick={() => {obj.setState({collapsed: !obj.state.collapsed})}} aria-controls="{obj.props.node}-msg" aria-expanded="{!obj.state.collapsed}">Node-{obj.props.node} State Machine</Button>
-          </td>);
-          first = false;
-        }
-        row.push(<td>Bucket-{bucket.ID}</td>)
-        bucket.Sequences.forEach(function(sequence) {
-          if(sequence === 0){
-            row.push(<td></td>);
-          } else if(sequence === 1){
-            row.push(<td style={{background:"yellow"}}>Q</td>);
-          } else if(sequence === 2){
-            row.push(<td style={{background:"yellow"}}>D</td>);
-          } else if(sequence === 3){
-            row.push(<td style={{background:"red"}}>I</td>);
-          } else if(sequence === 4){
-            row.push(<td style={{background:"yellow"}}>V</td>);
-          } else if(sequence === 5){
-            row.push(<td style={{background:"yellow"}}>P</td>);
-          } else if(sequence === 6){
-            row.push(<td style={{background:"green"}}>C</td>);
-          }
-        });
-        section.push(<tr>{row}</tr>);
-      });
-      table.push(<tbody style={{border:"solid black 3px"}}>{section}</tbody>)
-    }
-
-    if(nodeStatus.Nodes != null) {
-
-      nodeStatus.Nodes.forEach(function(node) {
-        let section = [];
-        let first = true;
-        let length = node.BucketStatuses.length
-        node.BucketStatuses.forEach(function(bucket) {
-          let row = [];
-          if(first) {
-            row.push(<td rowSpan={length}>Node-{node.ID}</td>);
-            first = false;
-          }
-          row.push(<td>Bucket-{bucket.BucketID}</td>)
-          for(let i = nodeStatus.LowWatermark ; i <= nodeStatus.HighWatermark ; i++) {
-            if(bucket.LastCheckpoint === i){
-              row.push(<td>X</td>);
-            } else if(bucket.LastCommit === i){
-              row.push(<td>C</td>);
-            } else if(bucket.LastPrepare === i){
-              row.push(<td>P</td>);
-            } else {
-              row.push(<td></td>);
-            }
-          }
-          section.push(<tr>{row}</tr>);
-        });
-        table.push(<Collapse id="{obj.props.node}-msgs" in={!obj.state.collapsed}><tbody style={{border:"solid black 3px"}}>{section}</tbody></Collapse>)
-      });
-    }
-
-    return table;
-  }
-}
-*/
 
 class SequenceHeaders extends Component {
   render() {
@@ -114,7 +29,7 @@ class SequenceStatusRow extends Component {
     return <tr>
       {(() => {if(this.props.bucket.ID === 0) {
         return <td rowSpan={this.props.numBuckets} style={{verticalAlign:"middle"}}>
-          <Button>Node-{this.props.nodeID} State Machine</Button>
+          <Button onClick={this.props.onToggle}>Node-{this.props.nodeID} State Machine</Button>
         </td>
       }})()}
 
@@ -153,17 +68,82 @@ class SequenceStatusRow extends Component {
   }
 }
 
+class SequenceMsgRow extends Component {
+  render() {
+    return <tr>
+      {(() => {
+        if(this.props.bucket.BucketID === 0) {
+          return <td rowSpan={this.props.numBuckets} style={{verticalAlign:"middle"}}>
+            Node-{this.props.nodeID}
+          </td>
+        }
+      })()}
+
+      <td></td>
+      {[...Array(this.props.offset).keys()].map((i) => {
+          return <td key={"offset-"+i} style={{background:"black"}}></td>;
+      })}
+
+      <td>Bucket-{this.props.bucket.BucketID}</td>
+
+      {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
+        let bucket = this.props.bucket;
+        let seq = i + this.props.lowWatermark;
+        if(bucket.LastCheckpoint === seq){
+          return <td key={"seq-"+seq}>X</td>;
+        } else if(bucket.LastCommit === seq){
+           return <td key={"seq-"+seq}>C</td>;
+        } else if(bucket.LastPrepare === seq){
+          return <td key={"seq-"+seq}>P</td>;
+        } else {
+          return <td key={"seq-"+seq}></td>;
+        }
+      })}
+
+      {[...Array(this.props.padding).keys()].map((i) => {
+        return <td key={"padding-"+i} style={{background:"gray"}}></td>
+      })}
+    </tr>
+  }
+}
+
+class SequenceMsgBody extends Component {
+  render() {
+    return <Collapse id={"msgs-"+this.props.nodeID} in={!this.props.collapsed}><tbody key={"node-"+this.props.nodeID} style={{border:"solid black 3px"}}>
+      {this.props.nodes.map((node) => {
+        return node.BucketStatuses.map((bucket) => {
+          return <SequenceMsgRow key={"node-"+this.props.nodeID+"-"+node.ID+"-"+bucket.BucketID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.BucketStatuses.length} nodeID={node.ID}/>
+      })})}
+    </tbody></Collapse>
+  }
+}
+
 class SequenceStatusBody extends Component {
   render() {
     return <tbody style={{border:"solid black 3px"}}>
       {this.props.buckets.map((bucket) => {
-        return <SequenceStatusRow key={"node-"+this.props.nodeID+"-"+bucket.ID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} numBuckets={this.props.buckets.length} nodeID={this.props.nodeID}/>
+        return <SequenceStatusRow key={"node-"+this.props.nodeID+"-"+bucket.ID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} numBuckets={this.props.buckets.length} nodeID={this.props.nodeID} onToggle={this.props.onToggle}/>
       })}
     </tbody>
   }
 }
 
 class StatusTable extends Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      collapsed: true
+    }
+    this.toggleCollapse = this.toggleCollapse.bind(this)
+  }
+
+  toggleCollapse() {
+    console.log("toggle")
+    this.setState({
+      collapsed: !this.state.collapsed
+    })
+  }
+
   render() {
     let lowWatermark = Math.min(...(this.props.nodes.map((i) => {return i.stateMachine.LowWatermark})))
     let highWatermark = Math.max(...(this.props.nodes.map((i) => {return i.stateMachine.HighWatermark})))
@@ -174,7 +154,12 @@ class StatusTable extends Component {
     return <Table bordered size="sm">
        <SequenceHeaders lowWatermark={lowWatermark} highWatermark={highWatermark} />
        {this.props.nodes.map((node) => {
-         return <SequenceStatusBody key={"node-"+node.ID} nodeID={node.ID} buckets={node.stateMachine.Buckets} offset={node.stateMachine.LowWatermark - lowWatermark} padding={highWatermark - node.stateMachine.HighWatermark } />
+         let offset = node.stateMachine.LowWatermark - lowWatermark;
+         let padding = highWatermark - node.stateMachine.HighWatermark;
+         return <React.Fragment key={"node-"+node.ID}>
+           <SequenceStatusBody key={"node-"+node.ID} nodeID={node.ID} buckets={node.stateMachine.Buckets} offset={offset} padding={padding} onToggle={this.toggleCollapse}/>
+           <SequenceMsgBody collapsed={this.state.collapsed} key={"node-msg-"+node.ID} nodeID={node.ID} offset={offset} padding={padding} nodes={node.stateMachine.Nodes} lowWatermark={node.stateMachine.LowWatermark} highWatermark={node.stateMachine.HighWatermark}/>
+          </React.Fragment>
        })}
     </Table>
   }
