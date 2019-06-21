@@ -51,12 +51,12 @@ func (b *Bucket) MoveWatermarks() {
 	// is wasteful, but it's easy to show it's correct, so implementing naively for now
 
 	for seqNo := range b.Sequences {
-		if seqNo < b.EpochConfig.LowWatermark {
+		if seqNo <= b.EpochConfig.LowWatermark {
 			delete(b.Sequences, seqNo)
 		}
 	}
 
-	for i := b.EpochConfig.LowWatermark; i <= b.EpochConfig.HighWatermark; i++ {
+	for i := b.EpochConfig.LowWatermark + 1; i <= b.EpochConfig.HighWatermark; i++ {
 		if _, ok := b.Sequences[i]; !ok {
 			b.Sequences[i] = NewSequence(b.EpochConfig, i, b.ID)
 		}
@@ -112,9 +112,9 @@ type BucketStatus struct {
 }
 
 func (b *Bucket) Status() *BucketStatus {
-	sequences := make([]SequenceState, int(b.EpochConfig.HighWatermark-b.EpochConfig.LowWatermark)+1)
+	sequences := make([]SequenceState, int(b.EpochConfig.HighWatermark-b.EpochConfig.LowWatermark))
 	for i := range sequences {
-		sequences[i] = b.Sequences[SeqNo(i)+b.EpochConfig.LowWatermark].State
+		sequences[i] = b.Sequences[SeqNo(i)+b.EpochConfig.LowWatermark+1].State
 	}
 	return &BucketStatus{
 		ID:             uint64(b.ID),

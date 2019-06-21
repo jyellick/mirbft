@@ -35,6 +35,8 @@ class SequenceStatusRow extends Component {
 
       <td>Bucket-{this.props.bucket.ID}</td>
 
+      <td style={{background:"black"}}/>
+
       {[...Array(this.props.offset).keys()].map((i) => {
           return <td key={"offset-"+i} style={{background:"black"}}></td>;
       })}
@@ -79,12 +81,11 @@ class SequenceMsgRow extends Component {
         }
       })()}
 
-      <td></td>
+      <td>Bucket-{this.props.bucket.BucketID}</td>
+
       {[...Array(this.props.offset).keys()].map((i) => {
           return <td key={"offset-"+i} style={{background:"black"}}></td>;
       })}
-
-      <td>Bucket-{this.props.bucket.BucketID}</td>
 
       {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
         let bucket = this.props.bucket;
@@ -114,11 +115,13 @@ class SequenceCheckpointRow extends Component {
       <td></td>
       <td>Checkpoints</td>
       {[...Array(this.props.offset).keys()].map((i) => {
-          return <td key={"offset-"+i} colSpan={this.props.offset} style={{background:"black"}}></td>;
+          return <td key={"offset-"+i} style={{background:"black"}}></td>;
       })}
 
+      <td style={{background:"green"}}>S</td>
+
       {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
-        let seq = i + this.props.lowWatermark;
+        let seq = i + this.props.lowWatermark+this.props.offset+1;
         let checkpoint = this.props.checkpoints.find((checkpoint) => {
           return checkpoint.SeqNo === seq
         })
@@ -148,13 +151,14 @@ class SequenceCheckpointRow extends Component {
 }
 
 class SequenceMsgBody extends Component {
-  render() {
-    return <Collapse id={"msgs-"+this.props.nodeID} in={!this.props.collapsed}><tbody key={"node-"+this.props.nodeID} style={{border:"solid black 3px"}}>
-      {this.props.nodes.map((node) => {
-        return node.BucketStatuses.map((bucket) => {
+  render() 
+    { return this.props.nodes.map((node) => {
+        return <Collapse id={"msgs-"+this.props.nodeID} in={!this.props.collapsed}><tbody key={"node-"+this.props.nodeID} style={{border:"solid black 3px"}}>
+          { node.BucketStatuses.map((bucket) => {
           return <SequenceMsgRow key={"node-"+this.props.nodeID+"-"+node.ID+"-"+bucket.BucketID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.BucketStatuses.length} nodeID={node.ID}/>
-      })})}
-    </tbody></Collapse>
+        })}
+     </tbody></Collapse>
+    })
   }
 }
 
