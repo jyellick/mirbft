@@ -1,7 +1,6 @@
 import React, { Component } from 'react';
 
 import Card from 'react-bootstrap/Card'
-import Collapse from 'react-bootstrap/Collapse'
 import Form from 'react-bootstrap/Form'
 import Container from 'react-bootstrap/Container'
 import Row from 'react-bootstrap/Row'
@@ -151,13 +150,16 @@ class SequenceCheckpointRow extends Component {
 }
 
 class SequenceMsgBody extends Component {
-  render() 
-    { return this.props.nodes.map((node) => {
-        return <Collapse id={"msgs-"+this.props.nodeID} in={!this.props.collapsed}><tbody key={"node-"+this.props.nodeID} style={{border:"solid black 3px"}}>
+  render() {
+    if(this.props.collapsed) {
+      return null
+    }
+    return this.props.nodes.map((node) => {
+        return <tbody key={"node-"+this.props.nodeID} style={{border:"solid black 3px"}}>
           { node.BucketStatuses.map((bucket) => {
           return <SequenceMsgRow key={"node-"+this.props.nodeID+"-"+node.ID+"-"+bucket.BucketID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.BucketStatuses.length} nodeID={node.ID}/>
         })}
-     </tbody></Collapse>
+     </tbody>
     })
   }
 }
