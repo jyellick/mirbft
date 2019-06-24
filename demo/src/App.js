@@ -2,6 +2,7 @@ import React, { Component } from 'react';
 
 import Card from 'react-bootstrap/Card'
 import Form from 'react-bootstrap/Form'
+import InputGroup from 'react-bootstrap/InputGroup'
 import Container from 'react-bootstrap/Container'
 import Row from 'react-bootstrap/Row'
 import Col from 'react-bootstrap/Col'
@@ -125,8 +126,6 @@ class SequenceCheckpointRow extends Component {
           return checkpoint.SeqNo === seq
         })
         if(checkpoint) {
-          console.log("checkpoint is found to be "+JSON.stringify(checkpoint))
-          console.log("making cell span "+skipped)
           let colSpan = skipped+1;
           skipped = 0;
           if(checkpoint.LocalAgreement && checkpoint.NetQuorum) {
@@ -155,9 +154,9 @@ class SequenceMsgBody extends Component {
       return null
     }
     return this.props.nodes.map((node) => {
-        return <tbody key={"node-"+this.props.nodeID} style={{border:"solid black 3px"}}>
+        return <tbody key={"node-msg-tbody-"+this.props.NodeID+"-"+node.ID} style={{border:"solid black 3px"}}>
           { node.BucketStatuses.map((bucket) => {
-          return <SequenceMsgRow key={"node-"+this.props.nodeID+"-"+node.ID+"-"+bucket.BucketID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.BucketStatuses.length} nodeID={node.ID}/>
+          return <SequenceMsgRow key={"node-msg-row-"+this.props.nodeID+"-"+node.ID+"-"+bucket.BucketID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.BucketStatuses.length} nodeID={node.ID}/>
         })}
      </tbody>
     })
@@ -185,7 +184,6 @@ class StatusTable extends Component {
   }
 
   toggleCollapse() {
-    console.log("toggle")
     this.setState({
       collapsed: !this.state.collapsed
     })
@@ -203,8 +201,8 @@ class StatusTable extends Component {
        {this.props.nodes.map((node) => {
          let offset = node.stateMachine.LowWatermark - lowWatermark;
          let padding = highWatermark - node.stateMachine.HighWatermark;
-         return <React.Fragment key={"node-"+node.ID}>
-           <SequenceStatusBody key={"node-"+node.ID} nodeID={node.ID} buckets={node.stateMachine.Buckets} checkpoints={node.stateMachine.Checkpoints} offset={offset} padding={padding} onToggle={this.toggleCollapse} lowWatermark={lowWatermark} highWatermark={highWatermark}/>
+         return <React.Fragment key={"node-fragment"+node.ID}>
+           <SequenceStatusBody key={"node-status-"+node.ID} nodeID={node.ID} buckets={node.stateMachine.Buckets} checkpoints={node.stateMachine.Checkpoints} offset={offset} padding={padding} onToggle={this.toggleCollapse} lowWatermark={lowWatermark} highWatermark={highWatermark}/>
            <SequenceMsgBody collapsed={this.state.collapsed} key={"node-msg-"+node.ID} nodeID={node.ID} offset={offset} padding={padding} nodes={node.stateMachine.Nodes} lowWatermark={node.stateMachine.LowWatermark} highWatermark={node.stateMachine.HighWatermark}/>
           </React.Fragment>
        })}
@@ -248,19 +246,25 @@ class NodeControl extends Component {
   }
 
   handlePropose(e) {
-    fetch("/node/"+this.props.node+"/propose", {
-      method:"POST",
-      body: ""+Math.random()
-    }).then(() => this.props.update())
-      .catch(function(error) {
-        console.log(error);
-        alert(error);
-      });
+    e.preventDefault()
+    let proposals = e.target.elements[1].value
+    for(let i = 0; i <= proposals; i++) {
+      fetch("/node/"+this.props.node+"/propose", {
+        method:"POST",
+        body: ""+Math.random()
+      }).then(() => this.props.update())
+        .catch(function(error) {
+          console.log(error);
+          alert(error);
+        });
+    }
+    this.props.update();
   }
 
   switchProcessing(e) {
     this.setState({automatic: e.target.value})
   }
+
 
   render() {
     if(this.props.actions.total > 0 && this.state.automatic !== "manual") {
@@ -283,20 +287,25 @@ class NodeControl extends Component {
                 <tr style={{fontWeight:"bold"}}><td>Total</td><td>{this.props.actions.total}</td></tr>
               </tbody>
           </Table>
-        <Form>
-          <Form.Group>
-            <Form.Label id='auto'>Processing </Form.Label>
-            <Form.Control as="select" onChange={this.switchProcessing}>
-              <option value="0">Automatic (immediate)</option>
-              <option value="50">Automatic (50ms delay)</option>
-              <option value="500">Automatic (500ms delay)</option>
-              <option value="1500">Automatic (1500ms delay)</option>
-              <option value="manual">Manual</option>
-            </Form.Control>
-          </Form.Group>
+        <Form onSubmit={(e) => this.handleProcess(e)}>
+          <Form.Label id='auto'>Processing </Form.Label>
+          <Form.Control as="select" onClick={(e) => {this.switchProcessing(e)}}>
+            <option value="0">Automatic (immediate)</option>
+            <option value="500">Automatic (500ms delay)</option>
+            <option value="1000">Automatic (1000ms delay)</option>
+            <option value="2000">Automatic (2000ms delay)</option>
+            <option value="manual">Manual</option>
+          </Form.Control>
+          <InputGroup>
+            <Button className="m-2" disabled={this.props.actions.total === 0 || this.state.automatic === true} onClick={(e) => {this.handleProcess(e)}}> Manual Step </Button>
+          </InputGroup>
         </Form>
-        <Button className="m-2" onClick={(e) => this.handleProcess(e)} disabled={this.props.actions.total === 0 || this.state.automatic === true}> Process </Button>
-        <Button className="m-2" onClick={(e) => this.handlePropose(e)}> Propose </Button>
+        <Form onSubmit={(e) => this.handlePropose(e)}>
+            <InputGroup>
+              <Button type="submit" className="m-2"> Propose </Button>
+              <Form.Control defaultValue="1" className="m-2"/>
+            </InputGroup>
+        </Form>
         </Card.Body>
       </Card>
   }
@@ -342,7 +351,7 @@ class App extends Component {
             <Row><Col><h1>MirBFT Status</h1></Col></Row>
             <Row>
               {this.state.nodes.map((node) => {
-                return <Col key={"node-"+node.ID}><NodeControl key={"node-"+node.ID} node={node.ID} actions={node.actions} update={this.updateStatus}/></Col>
+                return <Col key={"node-col-top-"+node.ID}><NodeControl key={"node-control-top-"+node.ID} node={node.ID} actions={node.actions} update={this.updateStatus}/></Col>
               })}
             </Row>
             <Row><Col> <StatusTable nodes={this.state.nodes}/> </Col></Row>
