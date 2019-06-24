@@ -247,18 +247,21 @@ class NodeControl extends Component {
 
   handlePropose(e) {
     e.preventDefault()
-    let proposals = e.target.elements[1].value
-    for(let i = 0; i <= proposals; i++) {
+    let proposals = Number(e.target.elements[1].value)
+    for(let i = 1; i <= proposals; i++) {
       fetch("/node/"+this.props.node+"/propose", {
         method:"POST",
-        body: ""+Math.random()
-      }).then(() => this.props.update())
+        body: JSON.stringify([...Array(10*1024).keys()].map(() => {return Math.random();}))
+      }).then(() => {
+          if(i === proposals) {
+            this.props.update();
+          }
+        })
         .catch(function(error) {
           console.log(error);
           alert(error);
         });
     }
-    this.props.update();
   }
 
   switchProcessing(e) {
@@ -274,6 +277,8 @@ class NodeControl extends Component {
     return <Card>
       <Card.Body>
         <Card.Title>Node {this.props.node}</Card.Title>
+          <Card.Text>State: {this.props.log.LastBytes}</Card.Text>
+          <Card.Text>Committed: {Math.floor(this.props.log.TotalBytes/1024)} kb</Card.Text>
           <Table size="sm">
               <thead><tr><th>Action</th><th>Outstanding</th></tr></thead>
               <tbody>
@@ -351,7 +356,7 @@ class App extends Component {
             <Row><Col><h1>MirBFT Status</h1></Col></Row>
             <Row>
               {this.state.nodes.map((node) => {
-                return <Col key={"node-col-top-"+node.ID}><NodeControl key={"node-control-top-"+node.ID} node={node.ID} actions={node.actions} update={this.updateStatus}/></Col>
+                return <Col key={"node-col-top-"+node.ID}><NodeControl key={"node-control-top-"+node.ID} node={node.ID} actions={node.actions} log={node.log} update={this.updateStatus}/></Col>
               })}
             </Row>
             <Row><Col> <StatusTable nodes={this.state.nodes}/> </Col></Row>

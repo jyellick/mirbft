@@ -23,10 +23,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// SampleLog is a log which simply trakcs the total number of bytes committed,
-// and the last 256 of those bytes in a round robin fashion.
+// SampleLog is a log which simply tracks the total number of bytes committed,
+// and the last 8 of those bytes in a round robin fashion.
 type SampleLog struct {
-	LastBytes  [256]byte
+	LastBytes  []byte
 	TotalBytes uint64
 	Position   int
 }
@@ -35,15 +35,15 @@ func (sl *SampleLog) Apply(entry *consumer.Entry) {
 	for _, data := range entry.Batch {
 		sl.TotalBytes += uint64(len(data))
 		for _, b := range data {
-			sl.Position = (sl.Position + 1) % 256
+			sl.Position = (sl.Position + 1) % len(sl.LastBytes)
 			sl.LastBytes[sl.Position] = b
 		}
 	}
 }
 
 func (sl *SampleLog) Snap() ([]byte, []byte) {
-	value := make([]byte, 256)
-	copy(sl.LastBytes[:], value)
+	value := make([]byte, len(sl.LastBytes))
+	copy(value, sl.LastBytes)
 	return value, nil
 }
 
@@ -96,7 +96,9 @@ func NewDemoEnv() (*DemoEnv, error) {
 	demoNodes := make([]*DemoNode, 4)
 
 	for i, node := range nodes {
-		sampleLog := &SampleLog{}
+		sampleLog := &SampleLog{
+			LastBytes: make([]byte, 8),
+		}
 
 		processor := &sample.SerialProcessor{
 			Node:      node,
@@ -181,11 +183,7 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 
 		nodeStatus := map[string]interface{}{}
-		var err error
-		nodeStatus["log"], err = json.Marshal(demoNode.Log)
-		if err != nil {
-			panic(err)
-		}
+		nodeStatus["log"] = demoNode.Log
 
 		nodeStatus["actions"] = map[string]int{
 			"broadcast":  len(demoNode.Actions.Broadcast),
@@ -205,6 +203,9 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		statusAsMap := map[string]interface{}{}
 		err = json.Unmarshal([]byte(status), &statusAsMap)
+		if err != nil {
+			panic(err)
+		}
 
 		nodeStatus["stateMachine"] = statusAsMap
 

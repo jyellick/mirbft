@@ -109,3 +109,6 @@ typings/
 
 # DynamoDB Local files
 .dynamodb/
+
+# demo binary
+demo
