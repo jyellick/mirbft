@@ -4,59 +4,59 @@ Copyright IBM Corp. All Rights Reserved.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package internal
+package mirbft
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"math"
 
-	"github.com/IBM/mirbft/consumer"
 	pb "github.com/IBM/mirbft/mirbftpb"
 
 	"go.uber.org/zap"
 )
 
-type StateMachine struct {
-	Config       *consumer.Config
-	CurrentEpoch *Epoch
+type stateMachine struct {
+	myConfig     *Config
+	currentEpoch *epoch
 }
 
-func (sm *StateMachine) Propose(data []byte) *consumer.Actions {
-	return &consumer.Actions{
-		Preprocess: []consumer.Proposal{
+func (sm *stateMachine) propose(data []byte) *Actions {
+	return &Actions{
+		Preprocess: []Proposal{
 			{
-				Source: sm.Config.ID,
+				Source: sm.myConfig.ID,
 				Data:   data,
 			},
 		},
 	}
 }
 
-func (sm *StateMachine) Step(source NodeID, outerMsg *pb.Msg) *consumer.Actions {
+func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
 	switch innerMsg := outerMsg.Type.(type) {
 	case *pb.Msg_Preprepare:
 		msg := innerMsg.Preprepare
 		// TODO check for nil and log oddity
-		return sm.CurrentEpoch.Preprepare(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Batch)
+		return sm.currentEpoch.Preprepare(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Batch)
 	case *pb.Msg_Prepare:
 		msg := innerMsg.Prepare
 		// TODO check for nil and log oddity
-		return sm.CurrentEpoch.Prepare(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
+		return sm.currentEpoch.Prepare(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
 	case *pb.Msg_Commit:
 		msg := innerMsg.Commit
 		// TODO check for nil and log oddity
-		return sm.CurrentEpoch.Commit(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
+		return sm.currentEpoch.Commit(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
 	case *pb.Msg_Checkpoint:
 		msg := innerMsg.Checkpoint
 		// TODO check for nil and log oddity
-		return sm.CurrentEpoch.Checkpoint(source, SeqNo(msg.SeqNo), msg.Value, msg.Attestation)
+		return sm.currentEpoch.Checkpoint(source, SeqNo(msg.SeqNo), msg.Value, msg.Attestation)
 	case *pb.Msg_Forward:
 		msg := innerMsg.Forward
 		// TODO check for nil and log oddity
-		return &consumer.Actions{
-			Preprocess: []consumer.Proposal{
+		// TODO should we have a separate validate step here?  How do we prevent
+		// forwarded messages with bad data from poisoning our batch?
+		return &Actions{
+			Preprocess: []Proposal{
 				{
 					Source: uint64(source),
 					Data:   msg.Data,
@@ -65,61 +65,61 @@ func (sm *StateMachine) Step(source NodeID, outerMsg *pb.Msg) *consumer.Actions 
 		}
 	default:
 		// TODO mark oddity
-		return &consumer.Actions{}
+		return &Actions{}
 	}
 }
 
-func (sm *StateMachine) ProcessResults(results consumer.ActionResults) *consumer.Actions {
-	actions := &consumer.Actions{}
+func (sm *stateMachine) processResults(results ActionResults) *Actions {
+	actions := &Actions{}
 	for i, preprocessResult := range results.Preprocesses {
-		sm.Config.Logger.Debug("applying preprocess result", zap.Int("index", i))
-		actions.Append(sm.CurrentEpoch.Process(preprocessResult))
+		sm.myConfig.Logger.Debug("applying preprocess result", zap.Int("index", i))
+		actions.Append(sm.currentEpoch.process(preprocessResult))
 	}
 
 	for i, digestResult := range results.Digests {
-		sm.Config.Logger.Debug("applying digest result", zap.Int("index", i))
-		actions.Append(sm.CurrentEpoch.Digest(SeqNo(digestResult.Entry.SeqNo), BucketID(digestResult.Entry.BucketID), digestResult.Digest))
+		sm.myConfig.Logger.Debug("applying digest result", zap.Int("index", i))
+		actions.Append(sm.currentEpoch.digest(SeqNo(digestResult.Entry.SeqNo), BucketID(digestResult.Entry.BucketID), digestResult.Digest))
 	}
 
 	for i, validateResult := range results.Validations {
-		sm.Config.Logger.Debug("applying validate result", zap.Int("index", i))
-		actions.Append(sm.CurrentEpoch.Validate(SeqNo(validateResult.Entry.SeqNo), BucketID(validateResult.Entry.BucketID), validateResult.Valid))
+		sm.myConfig.Logger.Debug("applying validate result", zap.Int("index", i))
+		actions.Append(sm.currentEpoch.validate(SeqNo(validateResult.Entry.SeqNo), BucketID(validateResult.Entry.BucketID), validateResult.Valid))
 	}
 
 	for i, checkpointResult := range results.Checkpoints {
-		sm.Config.Logger.Debug("applying checkpoint result", zap.Int("index", i))
-		actions.Append(sm.CurrentEpoch.CheckpointResult(SeqNo(checkpointResult.SeqNo), checkpointResult.Value, checkpointResult.Attestation))
+		sm.myConfig.Logger.Debug("applying checkpoint result", zap.Int("index", i))
+		actions.Append(sm.currentEpoch.checkpointResult(SeqNo(checkpointResult.SeqNo), checkpointResult.Value, checkpointResult.Attestation))
 	}
 
 	return actions
 }
 
-func (sm *StateMachine) Tick() *consumer.Actions {
-	return sm.CurrentEpoch.Tick()
+func (sm *stateMachine) tick() *Actions {
+	return sm.currentEpoch.Tick()
 }
 
-func (sm *StateMachine) Status() *Status {
-	epochConfig := sm.CurrentEpoch.EpochConfig
+func (sm *stateMachine) status() *Status {
+	epochConfig := sm.currentEpoch.epochConfig
 
-	nodes := make([]*NodeStatus, len(sm.CurrentEpoch.EpochConfig.Nodes))
-	for i, nodeID := range epochConfig.Nodes {
-		nodes[i] = sm.CurrentEpoch.Nodes[nodeID].Status()
+	nodes := make([]*NodeStatus, len(sm.currentEpoch.epochConfig.nodes))
+	for i, nodeID := range epochConfig.nodes {
+		nodes[i] = sm.currentEpoch.nodeMsgs[nodeID].status()
 	}
 
-	buckets := make([]*BucketStatus, len(sm.CurrentEpoch.Buckets))
-	for i := BucketID(0); i < BucketID(len(sm.CurrentEpoch.Buckets)); i++ {
-		buckets[int(i)] = sm.CurrentEpoch.Buckets[i].Status()
+	buckets := make([]*BucketStatus, len(sm.currentEpoch.buckets))
+	for i := BucketID(0); i < BucketID(len(sm.currentEpoch.buckets)); i++ {
+		buckets[int(i)] = sm.currentEpoch.buckets[i].status()
 	}
 
 	checkpoints := []*CheckpointStatus{}
-	for seqNo := epochConfig.LowWatermark + epochConfig.CheckpointInterval; seqNo <= epochConfig.HighWatermark; seqNo += epochConfig.CheckpointInterval {
-		checkpoints = append(checkpoints, sm.CurrentEpoch.CheckpointWindows[seqNo].Status())
+	for seqNo := epochConfig.lowWatermark + epochConfig.checkpointInterval; seqNo <= epochConfig.highWatermark; seqNo += epochConfig.checkpointInterval {
+		checkpoints = append(checkpoints, sm.currentEpoch.checkpointWindows[seqNo].status())
 	}
 
 	return &Status{
-		LowWatermark:  epochConfig.LowWatermark,
-		HighWatermark: epochConfig.HighWatermark,
-		EpochNumber:   epochConfig.Number,
+		LowWatermark:  epochConfig.lowWatermark,
+		HighWatermark: epochConfig.highWatermark,
+		EpochNumber:   epochConfig.number,
 		Nodes:         nodes,
 		Buckets:       buckets,
 		Checkpoints:   checkpoints,
@@ -133,14 +133,6 @@ type Status struct {
 	Nodes         []*NodeStatus
 	Buckets       []*BucketStatus
 	Checkpoints   []*CheckpointStatus
-}
-
-func (s *Status) JSON() string {
-	result, err := json.Marshal(s)
-	if err != nil {
-		panic(err)
-	}
-	return string(result)
 }
 
 func (s *Status) Pretty() string {
@@ -219,7 +211,7 @@ func (s *Status) Pretty() string {
 			}
 		}
 		if bucketStatus.Leader {
-			buffer.WriteString(fmt.Sprintf("| Bucket=%d (LocalLeader, Pending=%d)\n", bucketStatus.ID, bucketStatus.BatchesPending))
+			buffer.WriteString(fmt.Sprintf("| Bucket=%d (LocalLeader)\n", bucketStatus.ID))
 		} else {
 			buffer.WriteString(fmt.Sprintf("| Bucket=%d\n", bucketStatus.ID))
 		}
@@ -231,7 +223,7 @@ func (s *Status) Pretty() string {
 	for seqNo := s.LowWatermark; seqNo <= s.HighWatermark; seqNo++ {
 		checkpoint := s.Checkpoints[i]
 		if seqNo == SeqNo(checkpoint.SeqNo) {
-			buffer.WriteString(fmt.Sprintf("|%d", checkpoint.PendingCommits))
+			buffer.WriteString(fmt.Sprintf("|%d", checkpoint.pendingCommits))
 			i++
 			continue
 		}

@@ -4,52 +4,50 @@ Copyright IBM Corp. All Rights Reserved.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package internal_test
+package mirbft
 
 import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	"github.com/IBM/mirbft/consumer"
-	"github.com/IBM/mirbft/internal"
 	pb "github.com/IBM/mirbft/mirbftpb"
 )
 
-var _ = Describe("Sequence", func() {
+var _ = Describe("sequence", func() {
 	var (
-		s *internal.Sequence
+		s *sequence
 	)
 
 	BeforeEach(func() {
-		s = &internal.Sequence{
-			EpochConfig: &internal.EpochConfig{
-				MyConfig: &consumer.Config{
+		s = &sequence{
+			epochConfig: &epochConfig{
+				myConfig: &Config{
 					ID: 1,
 				},
-				Number: 4,
-				F:      1,
+				number: 4,
+				f:      1,
 			},
-			Entry: &consumer.Entry{
+			entry: &Entry{
 				Epoch:    4,
 				SeqNo:    5,
 				BucketID: 3,
 			},
-			Prepares: map[string]map[internal.NodeID]struct{}{},
-			Commits:  map[string]map[internal.NodeID]struct{}{},
+			prepares: map[string]map[NodeID]struct{}{},
+			commits:  map[string]map[NodeID]struct{}{},
 		}
 	})
 
-	Describe("ApplyPreprepare", func() {
+	Describe("applyPreprepare", func() {
 		It("transitions from Unknown to Preprepared", func() {
-			actions := s.ApplyPreprepare(
+			actions := s.applyPreprepare(
 				[][]byte{
 					[]byte("msg1"),
 					[]byte("msg2"),
 				},
 			)
 
-			Expect(actions).To(Equal(&consumer.Actions{
-				Digest: []*consumer.Entry{
+			Expect(actions).To(Equal(&Actions{
+				Digest: []*Entry{
 					{
 						SeqNo:    5,
 						Epoch:    4,
@@ -62,8 +60,8 @@ var _ = Describe("Sequence", func() {
 				},
 			}))
 
-			Expect(s.State).To(Equal(internal.Preprepared))
-			Expect(s.Entry.Batch).To(Equal(
+			Expect(s.state).To(Equal(Preprepared))
+			Expect(s.entry.Batch).To(Equal(
 				[][]byte{
 					[]byte("msg1"),
 					[]byte("msg2"),
@@ -73,12 +71,12 @@ var _ = Describe("Sequence", func() {
 
 		Context("when the current state is not Unknown", func() {
 			BeforeEach(func() {
-				s.State = internal.Validated
+				s.state = Validated
 			})
 
 			It("does not transition and instead panics", func() {
 				badTransition := func() {
-					s.ApplyPreprepare(
+					s.applyPreprepare(
 						[][]byte{
 							[]byte("msg1"),
 							[]byte("msg2"),
@@ -86,20 +84,20 @@ var _ = Describe("Sequence", func() {
 					)
 				}
 				Expect(badTransition).To(Panic())
-				Expect(s.State).To(Equal(internal.Validated))
+				Expect(s.state).To(Equal(Validated))
 			})
 		})
 	})
 
-	Describe("ApplyValidateResult", func() {
+	Describe("applyValidateResult", func() {
 		BeforeEach(func() {
-			s.State = internal.Digested
-			s.Digest = []byte("digest")
+			s.state = Digested
+			s.digest = []byte("digest")
 		})
 
 		It("transitions from Preprepared to Validated", func() {
-			actions := s.ApplyValidateResult(true)
-			Expect(actions).To(Equal(&consumer.Actions{
+			actions := s.applyValidateResult(true)
+			Expect(actions).To(Equal(&Actions{
 				Broadcast: []*pb.Msg{
 					{
 						Type: &pb.Msg_Prepare{
@@ -113,46 +111,46 @@ var _ = Describe("Sequence", func() {
 					},
 				},
 			}))
-			Expect(s.Digest).To(Equal([]byte("digest")))
-			Expect(s.State).To(Equal(internal.Validated))
+			Expect(s.digest).To(Equal([]byte("digest")))
+			Expect(s.state).To(Equal(Validated))
 		})
 
 		Context("when the state is not Preprepared", func() {
 			BeforeEach(func() {
-				s.State = internal.Prepared
+				s.state = Prepared
 			})
 
 			It("does not transition the state and panics", func() {
 				badTransition := func() {
-					s.ApplyValidateResult(true)
+					s.applyValidateResult(true)
 				}
 				Expect(badTransition).To(Panic())
-				Expect(s.State).To(Equal(internal.Prepared))
+				Expect(s.state).To(Equal(Prepared))
 			})
 		})
 
 		Context("when the validation is not successful", func() {
 			It("transitions the state to InvalidBatch", func() {
-				actions := s.ApplyValidateResult(false)
-				Expect(actions).To(Equal(&consumer.Actions{}))
-				Expect(s.State).To(Equal(internal.InvalidBatch))
+				actions := s.applyValidateResult(false)
+				Expect(actions).To(Equal(&Actions{}))
+				Expect(s.state).To(Equal(InvalidBatch))
 			})
 		})
 	})
 
-	Describe("ApplyPrepare", func() {
+	Describe("applyPrepare", func() {
 		BeforeEach(func() {
-			s.State = internal.Validated
-			s.Digest = []byte("digest")
-			s.Prepares["digest"] = map[internal.NodeID]struct{}{
+			s.state = Validated
+			s.digest = []byte("digest")
+			s.prepares["digest"] = map[NodeID]struct{}{
 				1: {},
 				2: {},
 			}
 		})
 
 		It("transitions from Validated to Prepared", func() {
-			actions := s.ApplyPrepare(0, []byte("digest"))
-			Expect(actions).To(Equal(&consumer.Actions{
+			actions := s.applyPrepare(0, []byte("digest"))
+			Expect(actions).To(Equal(&Actions{
 				Broadcast: []*pb.Msg{
 					{
 						Type: &pb.Msg_Commit{
