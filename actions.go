@@ -88,6 +88,17 @@ func (a *Actions) Append(o *Actions) {
 	a.Checkpoint = append(a.Checkpoint, o.Checkpoint...)
 }
 
+// Length returns the sum of all the lengths of the fields.
+func (a *Actions) Length() int {
+	return len(a.Broadcast) +
+		len(a.Unicast) +
+		len(a.Preprocess) +
+		len(a.Digest) +
+		len(a.Validate) +
+		len(a.Commit) +
+		len(a.Checkpoint)
+}
+
 // Unicast is an action to send a message to a particular node.
 type Unicast struct {
 	Target uint64

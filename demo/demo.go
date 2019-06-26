@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/IBM/mirbft"
-	"github.com/IBM/mirbft/consumer"
 	"github.com/IBM/mirbft/sample"
 
 	"github.com/gorilla/mux"
@@ -31,7 +30,7 @@ type SampleLog struct {
 	Position   int
 }
 
-func (sl *SampleLog) Apply(entry *consumer.Entry) {
+func (sl *SampleLog) Apply(entry *mirbft.Entry) {
 	for _, data := range entry.Batch {
 		sl.TotalBytes += uint64(len(data))
 		for _, b := range data {
@@ -60,7 +59,7 @@ type DemoEnv struct {
 
 type DemoNode struct {
 	Log       *SampleLog
-	Actions   *consumer.Actions
+	Actions   *mirbft.Actions
 	Processor *sample.SerialProcessor
 	Node      *mirbft.Node
 }
@@ -76,10 +75,10 @@ func NewDemoEnv() (*DemoEnv, error) {
 	nodes := make([]*mirbft.Node, 4)
 	replicas := []mirbft.Replica{{ID: 0}, {ID: 1}, {ID: 2}, {ID: 3}}
 	for i := range nodes {
-		config := &consumer.Config{
+		config := &mirbft.Config{
 			ID:     uint64(i),
 			Logger: logger.Named(fmt.Sprintf("node%d", i)),
-			BatchParameters: consumer.BatchParameters{
+			BatchParameters: mirbft.BatchParameters{
 				CutSizeBytes: 1,
 			},
 		}
@@ -109,7 +108,7 @@ func NewDemoEnv() (*DemoEnv, error) {
 			}),
 			Committer: &sample.SerialCommitter{
 				Log:                  sampleLog,
-				OutstandingSeqBucket: map[uint64]map[uint64]*consumer.Entry{},
+				OutstandingSeqBucket: map[uint64]map[uint64]*mirbft.Entry{},
 			},
 			Link:  sample.NewFakeLink(node.Config.ID, nodes, doneC),
 			DoneC: doneC,
@@ -117,7 +116,7 @@ func NewDemoEnv() (*DemoEnv, error) {
 
 		demoNodes[i] = &DemoNode{
 			Node:      node,
-			Actions:   &consumer.Actions{},
+			Actions:   &mirbft.Actions{},
 			Log:       sampleLog,
 			Processor: processor,
 		}
@@ -159,9 +158,9 @@ func (de *DemoEnv) HandleProcess(w http.ResponseWriter, r *http.Request) {
 
 	demoNode := de.DemoNodes[id]
 
-	de.Logger.Info("handling process request for node", zap.Int("node", id), zap.Int("actions", demoNode.Actions.Length()))
+	de.Logger.Info("handling process request for node", zap.Int("node", id), zap.Int("length", demoNode.Actions.Length()))
 
-	demoNode.Processor.Process(demoNode.Actions)
+	demoNode.Node.AddResults(*demoNode.Processor.Process(demoNode.Actions))
 	demoNode.Actions.Clear()
 
 	w.WriteHeader(http.StatusOK)
@@ -196,18 +195,13 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 			"total":      demoNode.Actions.Length(),
 		}
 
-		status, err := demoNode.Node.Status(r.Context(), mirbft.JSONEncoding)
+		status, err := demoNode.Node.Status(r.Context())
 		if err != nil {
 			// context canceled, or server stopped, return an error
 			return
 		}
-		statusAsMap := map[string]interface{}{}
-		err = json.Unmarshal([]byte(status), &statusAsMap)
-		if err != nil {
-			panic(err)
-		}
 
-		nodeStatus["stateMachine"] = statusAsMap
+		nodeStatus["stateMachine"] = status
 
 		nodeStatus["ID"] = i
 
