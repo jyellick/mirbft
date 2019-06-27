@@ -56,7 +56,7 @@ go func() {
 
 		select {
 		case actions := <-node.Ready():
-			processor.Process(&actions)
+			node.AddResults(processor.Process(&actions))
 		case <-ticker.C:
 			node.Tick()
 		case <-doneC:
