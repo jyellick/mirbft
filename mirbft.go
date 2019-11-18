@@ -34,6 +34,11 @@ type BucketID uint64
 // values with different meanings.
 type SeqNo uint64
 
+// EpochNo represents an epoch number.  It is a simple alias to a uint64, but
+// is used to help disambiguate function signatures which accept multiple uint64
+// values with different meanings.
+type EpochNo uint64
+
 // NodeID represents the identifier assigned to a node.  It is a simple alias to a uint64, but
 // is used to help disambiguate function signatures which accept multiple uint64
 // values with different meanings.
@@ -73,22 +78,24 @@ func StartNewNode(config *Config, doneC <-chan struct{}, replicas []Replica) (*N
 	return &Node{
 		Config:   config,
 		Replicas: replicas,
-		s: newSerializer(&stateMachine{
-			myConfig: config,
-			currentEpoch: newEpoch(&epochConfig{
-				myConfig: config,
-				oddities: &oddities{
-					nodes: map[NodeID]*oddity{},
+		s: newSerializer(
+			newStateMachine(
+				&epochConfig{
+					myConfig: config,
+					oddities: &oddities{
+						nodes: map[NodeID]*oddity{},
+					},
+					number:             0,
+					checkpointInterval: 5,
+					highWatermark:      50,
+					lowWatermark:       0,
+					f:                  f,
+					nodes:              nodes,
+					buckets:            buckets,
 				},
-				number:             0,
-				checkpointInterval: 5,
-				highWatermark:      50,
-				lowWatermark:       0,
-				f:                  f,
-				nodes:              nodes,
-				buckets:            buckets,
-			}),
-		}, doneC),
+			),
+			doneC,
+		),
 	}, nil
 }
 
