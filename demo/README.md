@@ -8,7 +8,7 @@ This starts a web server running on port 10000 which proxies requests to a fake 
 
 Then, in this same directory, run 
 
-### `npm start dev`
+### `npm install && npm start dev`
 
 Note, it is important to run with 'dev' as the node server will be proxying requests through to tbe backing golang one.  This should launch a browser, but otherwise, you may point to [http://localhost:3000](http://localhost:3000) to view it in the browser.
 
