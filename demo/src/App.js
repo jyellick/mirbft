@@ -35,8 +35,6 @@ class SequenceStatusRow extends Component {
 
       <td>Bucket-{this.props.bucket.ID}</td>
 
-      <td style={{background:"black"}}/>
-
       {[...Array(this.props.offset).keys()].map((i) => {
           return <td key={"offset-"+i} style={{background:"black"}}></td>;
       })}
@@ -118,10 +116,8 @@ class SequenceCheckpointRow extends Component {
           return <td key={"offset-"+i} style={{background:"black"}}></td>;
       })}
 
-      <td style={{background:"green"}}>S</td>
-
       {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
-        let seq = i + this.props.lowWatermark+this.props.offset+1;
+        let seq = i + this.props.lowWatermark+this.props.offset;
         let checkpoint = this.props.checkpoints.find((checkpoint) => {
           return checkpoint.SeqNo === seq
         })
