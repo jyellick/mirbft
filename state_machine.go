@@ -26,9 +26,12 @@ type stateMachine struct {
 }
 
 func newStateMachine(config *epochConfig) *stateMachine {
+	oddities := &oddities{
+		logger: config.myConfig.Logger,
+	}
 	nodeMsgs := map[NodeID]*nodeMsgs{}
 	for _, id := range config.nodes {
-		nodeMsgs[id] = newNodeMsgs(id, config)
+		nodeMsgs[id] = newNodeMsgs(id, config, oddities)
 	}
 
 	checkpointWindows := []*checkpointWindow{}
@@ -60,9 +63,12 @@ func (sm *stateMachine) propose(data []byte) *Actions {
 	}
 }
 
-func (sm *stateMachine) checkpointWindowForSeqNo(seqNo uint64) *checkpointWindow {
-	offset := seqNo - uint64(sm.checkpointWindows[0].start)
-	index := offset / uint64(sm.currentEpochConfig.checkpointInterval)
+func (sm *stateMachine) checkpointWindowForSeqNo(seqNo SeqNo) *checkpointWindow {
+	offset := seqNo - SeqNo(sm.checkpointWindows[0].start)
+	index := offset / SeqNo(sm.currentEpochConfig.checkpointInterval)
+	if int(index) >= len(sm.checkpointWindows) {
+		return nil
+	}
 	return sm.checkpointWindows[index]
 }
 
@@ -83,17 +89,17 @@ func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
 		switch innerMsg := msg.Type.(type) {
 		case *pb.Msg_Preprepare:
 			msg := innerMsg.Preprepare
-			return sm.checkpointWindowForSeqNo(msg.SeqNo).preprepare(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Batch)
+			return sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo)).applyPreprepareMsg(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Batch)
 		case *pb.Msg_Prepare:
 			msg := innerMsg.Prepare
-			return sm.checkpointWindowForSeqNo(msg.SeqNo).prepare(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
+			return sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo)).applyPrepareMsg(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
 		case *pb.Msg_Commit:
 			msg := innerMsg.Commit
-			actions := sm.checkpointWindowForSeqNo(msg.SeqNo).commit(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
+			actions := sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo)).applyCommitMsg(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
 			if len(actions.Commit) > 0 {
 				// XXX this is a moderately hacky way to determine if this commit msg triggered
 				// a commit, is there a better way?
-				cw := sm.checkpointWindow(SeqNo(msg.SeqNo))
+				cw := sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo))
 				if cw != nil && cw.end == SeqNo(msg.SeqNo) {
 					actions.Append(cw.committed(BucketID(msg.Bucket)))
 				}
@@ -101,11 +107,9 @@ func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
 			return actions
 		case *pb.Msg_Checkpoint:
 			msg := innerMsg.Checkpoint
-			// TODO check for nil and log oddity
 			return sm.checkpointMsg(source, SeqNo(msg.SeqNo), msg.Value, msg.Attestation)
 		case *pb.Msg_Forward:
 			msg := innerMsg.Forward
-			// TODO check for nil and log oddity
 			// TODO should we have a separate validate step here?  How do we prevent
 			// forwarded messages with bad data from poisoning our batch?
 			return &Actions{
@@ -126,7 +130,7 @@ func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
 }
 
 func (sm *stateMachine) checkpointMsg(source NodeID, seqNo SeqNo, value, attestation []byte) *Actions {
-	cw := sm.checkpointWindow(seqNo)
+	cw := sm.checkpointWindowForSeqNo(seqNo)
 
 	actions := cw.applyCheckpointMsg(source, value, attestation)
 
@@ -172,37 +176,25 @@ func (sm *stateMachine) processResults(results ActionResults) *Actions {
 	for i, digestResult := range results.Digests {
 		sm.myConfig.Logger.Debug("applying digest result", zap.Int("index", i))
 		seqNo := digestResult.Entry.SeqNo
-		actions.Append(sm.checkpointWindowForSeqNo(seqNo).digest(SeqNo(seqNo), BucketID(digestResult.Entry.BucketID), digestResult.Digest))
+		actions.Append(sm.checkpointWindowForSeqNo(SeqNo(seqNo)).applyDigestResult(SeqNo(seqNo), BucketID(digestResult.Entry.BucketID), digestResult.Digest))
 	}
 
 	for i, validateResult := range results.Validations {
 		sm.myConfig.Logger.Debug("applying validate result", zap.Int("index", i))
 		seqNo := validateResult.Entry.SeqNo
-		actions.Append(sm.checkpointWindowForSeqNo(seqNo).validate(SeqNo(seqNo), BucketID(validateResult.Entry.BucketID), validateResult.Valid))
+		actions.Append(sm.checkpointWindowForSeqNo(SeqNo(seqNo)).applyValidateResult(SeqNo(seqNo), BucketID(validateResult.Entry.BucketID), validateResult.Valid))
 	}
 
 	for i, checkpointResult := range results.Checkpoints {
 		sm.myConfig.Logger.Debug("applying checkpoint result", zap.Int("index", i))
-		actions.Append(sm.checkpointResult(SeqNo(checkpointResult.SeqNo), checkpointResult.Value, checkpointResult.Attestation))
+		actions.Append(sm.applyCheckpointResult(SeqNo(checkpointResult.SeqNo), checkpointResult.Value, checkpointResult.Attestation))
 	}
 
 	return actions
 }
 
-func (sm *stateMachine) checkpointWindow(seqNo SeqNo) *checkpointWindow {
-	for _, cw := range sm.checkpointWindows {
-		if cw.start > seqNo {
-			break
-		}
-		if cw.end >= seqNo {
-			return cw
-		}
-	}
-	return nil
-}
-
-func (sm *stateMachine) checkpointResult(seqNo SeqNo, value, attestation []byte) *Actions {
-	cw := sm.checkpointWindow(seqNo)
+func (sm *stateMachine) applyCheckpointResult(seqNo SeqNo, value, attestation []byte) *Actions {
+	cw := sm.checkpointWindowForSeqNo(seqNo)
 	if cw == nil {
 		panic("received an unexpected checkpoint result")
 	}
