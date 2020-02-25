@@ -17,59 +17,91 @@ import (
 )
 
 type stateMachine struct {
-	myConfig           *Config
-	nodeMsgs           map[NodeID]*nodeMsgs
-	currentEpochConfig *epochConfig
-	proposer           *proposer
+	myConfig       *Config
+	networkConfig  *pb.NetworkConfig
+	nodeMsgs       map[NodeID]*nodeMsgs
+	requestWindows map[string]*requestWindow
 
-	checkpointWindows []*checkpointWindow
+	activeEpoch       *epoch
+	checkpointTracker *checkpointTracker
+	epochChanger      *epochChanger
 }
 
-func newStateMachine(config *epochConfig) *stateMachine {
+func newStateMachine(networkConfig *pb.NetworkConfig, myConfig *Config) *stateMachine {
 	oddities := &oddities{
-		logger: config.myConfig.Logger,
-	}
-	nodeMsgs := map[NodeID]*nodeMsgs{}
-	for _, id := range config.nodes {
-		nodeMsgs[id] = newNodeMsgs(id, config, oddities)
+		logger: myConfig.Logger,
 	}
 
-	checkpointWindows := []*checkpointWindow{}
-	lastEnd := SeqNo(0)
-	for i := 0; i < 4; i++ {
-		newLastEnd := lastEnd + config.checkpointInterval
-		cw := newCheckpointWindow(lastEnd+1, newLastEnd, config)
-		checkpointWindows = append(checkpointWindows, cw)
-		lastEnd = newLastEnd
+	fakeCheckpoint := &pb.Checkpoint{
+		SeqNo: 0,
+		Value: []byte("TODO, get from state"),
 	}
+
+	nodeMsgs := map[NodeID]*nodeMsgs{}
+	requestWindows := map[string]*requestWindow{}
+	for _, id := range networkConfig.Nodes {
+		requestWindow := newRequestWindow(fakeCheckpoint.SeqNo+1, fakeCheckpoint.SeqNo+2*uint64(networkConfig.CheckpointInterval))
+		nodeMsgs[NodeID(id)] = newNodeMsgs(NodeID(id), networkConfig, requestWindow, myConfig, oddities)
+		requestWindows[string(uint64ToBytes(id))] = requestWindow
+	}
+
+	checkpointTracker := newCheckpointTracker(networkConfig, myConfig)
+
+	epochChange, err := newEpochChange(
+		&pb.EpochChange{
+			Checkpoints: []*pb.Checkpoint{fakeCheckpoint},
+		},
+	)
+
+	if err != nil {
+		panic(err)
+	}
+
+	epochChanger := &epochChanger{
+		myConfig:      myConfig,
+		networkConfig: networkConfig,
+		targets:       map[uint64]*epochTarget{},
+	}
+
+	target := epochChanger.target(0)
+	target.changes[NodeID(myConfig.ID)] = epochChange
+	target.myEpochChange = epochChange.underlying
+	epochChanger.pendingEpochTarget = target
 
 	return &stateMachine{
-		myConfig:           config.myConfig,
-		currentEpochConfig: config,
-		nodeMsgs:           nodeMsgs,
-		checkpointWindows:  checkpointWindows,
-		proposer:           newProposer(config),
+		myConfig:          myConfig,
+		networkConfig:     networkConfig,
+		epochChanger:      epochChanger,
+		checkpointTracker: checkpointTracker,
+		nodeMsgs:          nodeMsgs,
+		requestWindows:    requestWindows,
 	}
 }
 
 func (sm *stateMachine) propose(data []byte) *Actions {
+	reqNo := sm.requestWindows[string(uint64ToBytes(sm.myConfig.ID))].allocateNext()
+	requestData := &pb.RequestData{
+		ClientId: uint64ToBytes(sm.myConfig.ID),
+		ReqNo:    reqNo,
+		Data:     data,
+	}
 	return &Actions{
-		Preprocess: []Proposal{
+		Broadcast: []*pb.Msg{
 			{
-				Source: sm.myConfig.ID,
-				Data:   data,
+				Type: &pb.Msg_Forward{
+					Forward: &pb.Forward{
+						RequestData: requestData,
+					},
+				},
+			},
+		},
+		Preprocess: []*Request{
+			{
+				Source:        sm.myConfig.ID,
+				ClientRequest: requestData,
 			},
 		},
 	}
-}
-
-func (sm *stateMachine) checkpointWindowForSeqNo(seqNo SeqNo) *checkpointWindow {
-	offset := seqNo - SeqNo(sm.checkpointWindows[0].start)
-	index := offset / SeqNo(sm.currentEpochConfig.checkpointInterval)
-	if int(index) >= len(sm.checkpointWindows) {
-		return nil
-	}
-	return sm.checkpointWindows[index]
 }
 
 func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
@@ -80,210 +112,279 @@ func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
 
 	nodeMsgs.ingest(outerMsg)
 
-	for {
-		msg := nodeMsgs.next()
-		if msg == nil {
-			break
-		}
-
-		switch innerMsg := msg.Type.(type) {
-		case *pb.Msg_Preprepare:
-			msg := innerMsg.Preprepare
-			return sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo)).applyPreprepareMsg(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Batch)
-		case *pb.Msg_Prepare:
-			msg := innerMsg.Prepare
-			return sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo)).applyPrepareMsg(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
-		case *pb.Msg_Commit:
-			msg := innerMsg.Commit
-			actions := sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo)).applyCommitMsg(source, SeqNo(msg.SeqNo), BucketID(msg.Bucket), msg.Digest)
-			if len(actions.Commit) > 0 {
-				// XXX this is a moderately hacky way to determine if this commit msg triggered
-				// a commit, is there a better way?
-				cw := sm.checkpointWindowForSeqNo(SeqNo(msg.SeqNo))
-				if cw != nil && cw.end == SeqNo(msg.SeqNo) {
-					actions.Append(cw.committed(BucketID(msg.Bucket)))
-				}
-			}
-			return actions
-		case *pb.Msg_Checkpoint:
-			msg := innerMsg.Checkpoint
-			return sm.checkpointMsg(source, SeqNo(msg.SeqNo), msg.Value, msg.Attestation)
-		case *pb.Msg_Forward:
-			msg := innerMsg.Forward
-			// TODO should we have a separate validate step here?  How do we prevent
-			// forwarded messages with bad data from poisoning our batch?
-			return &Actions{
-				Preprocess: []Proposal{
-					{
-						Source: uint64(source),
-						Data:   msg.Data,
-					},
-				},
-			}
-		default:
-			// TODO mark oddity
-			return &Actions{}
-		}
-	}
-
-	return &Actions{}
+	return sm.drainNodeMsgs()
 }
 
-func (sm *stateMachine) checkpointMsg(source NodeID, seqNo SeqNo, value, attestation []byte) *Actions {
-	cw := sm.checkpointWindowForSeqNo(seqNo)
-
-	actions := cw.applyCheckpointMsg(source, value, attestation)
-
-	if !sm.checkpointWindows[0].obsolete && !sm.checkpointWindows[1].garbageCollectible {
-		return actions
-	}
-
-	// Either the oldest checkpoint is obsolete (because all nodes have emitted a checkpoint
-	// for it), or the second oldest checkpoint is garbage collectible.  In either event,
-	// clean up the oldest checkpoint interval.
-
-	sm.checkpointWindows = sm.checkpointWindows[1:]
-	lcw := sm.checkpointWindows[len(sm.checkpointWindows)-1]
-	lowWatermark := sm.checkpointWindows[0].start
-	highWatermark := lcw.end + sm.currentEpochConfig.checkpointInterval
-
-	sm.checkpointWindows = append(
-		sm.checkpointWindows,
-		newCheckpointWindow(
-			lcw.end+1,
-			highWatermark,
-			sm.currentEpochConfig,
-		),
-	)
-
-	sm.currentEpochConfig.lowWatermark = lowWatermark
-	sm.currentEpochConfig.highWatermark = highWatermark
-
-	for _, node := range sm.nodeMsgs {
-		node.moveWatermarks()
-	}
-
-	return sm.proposer.drainQueue()
-}
-
-func (sm *stateMachine) processResults(results ActionResults) *Actions {
+func (sm *stateMachine) drainNodeMsgs() *Actions {
 	actions := &Actions{}
-	for i, preprocessResult := range results.Preprocesses {
-		sm.myConfig.Logger.Debug("applying preprocess result", zap.Int("index", i))
-		actions.Append(sm.process(preprocessResult))
+	for {
+		moreActions := false
+		for source, nodeMsgs := range sm.nodeMsgs {
+			msg := nodeMsgs.next()
+			if msg == nil {
+				continue
+			}
+			moreActions = true
+
+			switch innerMsg := msg.Type.(type) {
+			case *pb.Msg_Preprepare:
+				msg := innerMsg.Preprepare
+				actions.Append(sm.applyPreprepareMsg(source, msg))
+			case *pb.Msg_Prepare:
+				msg := innerMsg.Prepare
+				actions.Append(sm.activeEpoch.applyPrepareMsg(source, msg.SeqNo, msg.Digest))
+			case *pb.Msg_Commit:
+				msg := innerMsg.Commit
+				actions.Append(sm.activeEpoch.applyCommitMsg(source, msg.SeqNo, msg.Digest))
+			case *pb.Msg_Checkpoint:
+				msg := innerMsg.Checkpoint
+				actions.Append(sm.checkpointMsg(source, msg.SeqNo, msg.Value))
+			case *pb.Msg_Forward:
+				if source == NodeID(sm.myConfig.ID) {
+					// We've already pre-processed this
+					continue
+				}
+				msg := innerMsg.Forward
+				actions.Preprocess = append(actions.Preprocess, &Request{
+					Source:        uint64(source),
+					ClientRequest: msg.RequestData,
+				})
+			case *pb.Msg_Suspect:
+				sm.applySuspectMsg(source, innerMsg.Suspect.Epoch)
+			case *pb.Msg_EpochChange:
+				actions.Append(sm.epochChanger.applyEpochChangeMsg(source, innerMsg.EpochChange))
+			case *pb.Msg_NewEpoch:
+				actions.Append(sm.epochChanger.applyNewEpochMsg(innerMsg.NewEpoch))
+			case *pb.Msg_NewEpochEcho:
+				actions.Append(sm.epochChanger.applyNewEpochEchoMsg(source, innerMsg.NewEpochEcho))
+			case *pb.Msg_NewEpochReady:
+				actions.Append(sm.applyNewEpochReadyMsg(source, innerMsg.NewEpochReady))
+			default:
+				// This should be unreachable, as the nodeMsgs filters based on type as well
+				panic("unexpected bad message type, should have been detected earlier")
+			}
+		}
+
+		if !moreActions {
+			return actions
+		}
+	}
+}
+
+func (sm *stateMachine) applyPreprepareMsg(source NodeID, msg *pb.Preprepare) *Actions {
+	requests := make([]*request, len(msg.Batch))
+
+	for i, batchEntry := range msg.Batch {
+		requestWindow, ok := sm.requestWindows[string(batchEntry.ClientId)]
+		if !ok {
+			panic("unexpected")
+		}
+
+		request := requestWindow.request(batchEntry.ReqNo)
+		if request == nil {
+			panic(fmt.Sprintf("could not find reqno=%d for batch entry from %d, this should have been hackily handled by the nodemsgs stuff", batchEntry.ReqNo, source))
+		}
+		requests[i] = request
 	}
 
-	for i, digestResult := range results.Digests {
-		sm.myConfig.Logger.Debug("applying digest result", zap.Int("index", i))
-		seqNo := digestResult.Entry.SeqNo
-		actions.Append(sm.checkpointWindowForSeqNo(SeqNo(seqNo)).applyDigestResult(SeqNo(seqNo), BucketID(digestResult.Entry.BucketID), digestResult.Digest))
+	return sm.activeEpoch.applyPreprepareMsg(source, msg.SeqNo, requests)
+}
+
+func (sm *stateMachine) applySuspectMsg(source NodeID, epoch uint64) *Actions {
+	epochChange := sm.epochChanger.applySuspectMsg(source, epoch)
+	if epochChange == nil {
+		return &Actions{}
 	}
 
-	for i, validateResult := range results.Validations {
-		sm.myConfig.Logger.Debug("applying validate result", zap.Int("index", i))
-		seqNo := validateResult.Entry.SeqNo
-		actions.Append(sm.checkpointWindowForSeqNo(SeqNo(seqNo)).applyValidateResult(SeqNo(seqNo), BucketID(validateResult.Entry.BucketID), validateResult.Valid))
+	for _, nodeMsgs := range sm.nodeMsgs {
+		nodeMsgs.setActiveEpoch(nil)
 	}
+	sm.activeEpoch = nil
 
-	for i, checkpointResult := range results.Checkpoints {
-		sm.myConfig.Logger.Debug("applying checkpoint result", zap.Int("index", i))
-		actions.Append(sm.applyCheckpointResult(SeqNo(checkpointResult.SeqNo), checkpointResult.Value, checkpointResult.Attestation))
+	return &Actions{
+		Broadcast: []*pb.Msg{
+			{
+				Type: &pb.Msg_EpochChange{
+					EpochChange: epochChange,
+				},
+			},
+		},
+	}
+}
+
+func (sm *stateMachine) applyNewEpochReadyMsg(source NodeID, msg *pb.NewEpochReady) *Actions {
+	actions := sm.epochChanger.applyNewEpochReadyMsg(source, msg)
+
+	if sm.epochChanger.state == ready {
+		sm.activeEpoch = newEpoch(sm.epochChanger.pendingEpochTarget.leaderNewEpoch, sm.checkpointTracker, sm.requestWindows, sm.epochChanger.lastActiveEpoch, sm.networkConfig, sm.myConfig)
+		for _, sequence := range sm.activeEpoch.sequences {
+			if sequence.state >= Prepared {
+				actions.Broadcast = append(actions.Broadcast, &pb.Msg{
+					Type: &pb.Msg_Commit{
+						Commit: &pb.Commit{
+							SeqNo:  sequence.seqNo,
+							Epoch:  sequence.epoch,
+							Digest: sequence.digest,
+						},
+					},
+				})
+			}
+		}
+		actions.Append(sm.activeEpoch.advanceUncommitted())
+		actions.Append(sm.activeEpoch.drainProposer())
+		sm.epochChanger.state = idle
+		sm.epochChanger.lastActiveEpoch = sm.activeEpoch
+		for _, nodeMsgs := range sm.nodeMsgs {
+			nodeMsgs.setActiveEpoch(sm.activeEpoch)
+		}
 	}
 
 	return actions
 }
 
-func (sm *stateMachine) applyCheckpointResult(seqNo SeqNo, value, attestation []byte) *Actions {
-	cw := sm.checkpointWindowForSeqNo(seqNo)
-	if cw == nil {
-		panic("received an unexpected checkpoint result")
+func (sm *stateMachine) checkpointMsg(source NodeID, seqNo uint64, value []byte) *Actions {
+	if !sm.checkpointTracker.applyCheckpointMsg(source, seqNo, value) {
+		return &Actions{}
 	}
-	return cw.applyCheckpointResult(value, attestation)
+
+	for _, requestWindow := range sm.requestWindows {
+		requestWindow.garbageCollect(seqNo)
+	}
+	actions := sm.activeEpoch.moveWatermarks()
+	actions.Append(sm.drainNodeMsgs())
+	return actions
 }
 
-func (sm *stateMachine) process(preprocessResult PreprocessResult) *Actions {
-	bucketID := BucketID(preprocessResult.Cup % uint64(len(sm.currentEpochConfig.buckets)))
-	nodeID := sm.currentEpochConfig.buckets[bucketID]
-	if nodeID == NodeID(sm.currentEpochConfig.myConfig.ID) {
-		return sm.proposer.propose(preprocessResult.Proposal.Data)
+func (sm *stateMachine) processResults(results ActionResults) *Actions {
+	actions := &Actions{}
+
+	for _, preprocessResult := range results.Preprocessed {
+		// sm.myConfig.Logger.Debug("applying preprocess result", zap.Int("index", i))
+		actions.Append(sm.applyPreprocessResult(preprocessResult))
 	}
 
-	if preprocessResult.Proposal.Source == sm.currentEpochConfig.myConfig.ID {
-		// I originated this proposal, but someone else leads this bucket,
-		// forward the message to them
-		return &Actions{
-			Unicast: []Unicast{
-				{
-					Target: uint64(nodeID),
-					Msg: &pb.Msg{
-						Type: &pb.Msg_Forward{
-							Forward: &pb.Forward{
-								Epoch:  sm.currentEpochConfig.number,
-								Bucket: uint64(bucketID),
-								Data:   preprocessResult.Proposal.Data,
-							},
-						},
-					},
-				},
-			},
-		}
+	for _, checkpointResult := range results.Checkpoints {
+		// sm.myConfig.Logger.Debug("applying checkpoint result", zap.Int("index", i))
+		actions.Append(sm.checkpointTracker.applyCheckpointResult(checkpointResult.SeqNo, checkpointResult.Value))
 	}
 
-	// Someone forwarded me this proposal, but I'm not responsible for it's bucket
-	// TODO, log oddity? Assign it to the wrong bucket? Forward it again?
-	return &Actions{}
+	if sm.activeEpoch == nil {
+		// TODO, this is a little heavy handed, we should probably
+		// work with the persistence so we don't redo the effort.
+		return actions
+	}
+
+	for _, processResult := range results.Processed {
+		// sm.myConfig.Logger.Debug("applying digest result", zap.Int("index", i))
+		seqNo := processResult.Batch.SeqNo
+		actions.Append(sm.activeEpoch.applyProcessResult(seqNo, processResult.Digest))
+	}
+
+	return actions
+}
+
+func (sm *stateMachine) applyPreprocessResult(preprocessResult *PreprocessResult) *Actions {
+	requestWindow, ok := sm.requestWindows[string(preprocessResult.RequestData.ClientId)]
+	if !ok {
+		panic("unexpected")
+	}
+
+	requestWindow.allocate(preprocessResult.RequestData, preprocessResult.Digest)
+
+	actions := &Actions{}
+
+	if sm.activeEpoch != nil {
+		sm.activeEpoch.proposer.stepRequestWindow(string(preprocessResult.RequestData.ClientId))
+		actions.Append(sm.activeEpoch.drainProposer())
+	}
+
+	return actions
 }
 
 func (sm *stateMachine) tick() *Actions {
-	return sm.proposer.noopAdvance()
+	actions := &Actions{}
+
+	if sm.activeEpoch != nil {
+		actions.Append(sm.activeEpoch.tick())
+	}
+
+	actions.Append(sm.epochChanger.tick())
+
+	return actions
 }
 
 func (sm *stateMachine) status() *Status {
-	epochConfig := sm.currentEpochConfig
+	requestWindowsStatus := make([]*RequestWindowStatus, len(sm.requestWindows))
 
-	nodes := make([]*NodeStatus, len(epochConfig.nodes))
-	for i, nodeID := range epochConfig.nodes {
+	nodes := make([]*NodeStatus, len(sm.networkConfig.Nodes))
+	for i, nodeID := range sm.networkConfig.Nodes {
+		nodeID := NodeID(nodeID)
 		nodes[i] = sm.nodeMsgs[nodeID].status()
+		requestWindowsStatus[i] = sm.requestWindows[string(uint64ToBytes(uint64(nodeID)))].status()
 	}
 
-	var buckets []*BucketStatus
 	checkpoints := []*CheckpointStatus{}
-	for _, cw := range sm.checkpointWindows {
-		checkpoints = append(checkpoints, cw.status())
-		if buckets == nil {
-			buckets = make([]*BucketStatus, len(cw.buckets))
-			for i := BucketID(0); i < BucketID(len(sm.checkpointWindows[0].buckets)); i++ {
-				buckets[int(i)] = cw.buckets[i].status()
-			}
+	var buckets []*BucketStatus
+	var lowWatermark, highWatermark uint64
+
+	if sm.epochChanger.lastActiveEpoch != nil {
+		epoch := sm.epochChanger.lastActiveEpoch
+		for _, cw := range epoch.checkpoints {
+			checkpoints = append(checkpoints, cw.status())
+		}
+
+		buckets = epoch.status()
+
+		lowWatermark = epoch.baseCheckpoint.SeqNo / uint64(len(buckets))
+
+		if epoch != nil && len(epoch.checkpoints) > 0 {
+			highWatermark = epoch.checkpoints[len(epoch.checkpoints)-1].end / uint64(len(buckets))
 		} else {
-			for i := BucketID(0); i < BucketID(len(sm.checkpointWindows[0].buckets)); i++ {
-				buckets[int(i)].Sequences = append(buckets[int(i)].Sequences, cw.buckets[i].status().Sequences...)
-			}
+			highWatermark = lowWatermark
 		}
 	}
 
 	return &Status{
-		LowWatermark:  epochConfig.lowWatermark,
-		HighWatermark: epochConfig.highWatermark,
-		EpochNumber:   epochConfig.number,
-		Nodes:         nodes,
-		Buckets:       buckets,
-		Checkpoints:   checkpoints,
+		NodeID:         sm.myConfig.ID,
+		LowWatermark:   lowWatermark,
+		HighWatermark:  highWatermark,
+		EpochChanger:   sm.epochChanger.status(),
+		RequestWindows: requestWindowsStatus,
+		Buckets:        buckets,
+		Checkpoints:    checkpoints,
+		Nodes:          nodes,
 	}
 }
 
 type Status struct {
-	LowWatermark  SeqNo
-	HighWatermark SeqNo
-	EpochNumber   uint64
-	Nodes         []*NodeStatus
-	Buckets       []*BucketStatus
-	Checkpoints   []*CheckpointStatus
+	NodeID         uint64
+	LowWatermark   uint64
+	HighWatermark  uint64
+	EpochChanger   *EpochChangerStatus
+	Nodes          []*NodeStatus
+	Buckets        []*BucketStatus
+	Checkpoints    []*CheckpointStatus
+	RequestWindows []*RequestWindowStatus
 }
 
 func (s *Status) Pretty() string {
 	var buffer bytes.Buffer
-	buffer.WriteString(fmt.Sprintf("LowWatermark=%d, HighWatermark=%d, Epoch=%d\n\n", s.LowWatermark, s.HighWatermark, s.EpochNumber))
+	buffer.WriteString(fmt.Sprintf("===========================================\n"))
+	buffer.WriteString(fmt.Sprintf("NodeID=%d, LowWatermark=%d, HighWatermark=%d, Epoch=%d\n", s.NodeID, s.LowWatermark, s.HighWatermark, s.EpochChanger.LastActiveEpoch))
+	buffer.WriteString(fmt.Sprintf("===========================================\n\n"))
+
+	buffer.WriteString("=== Epoch Changer ===\n")
+	buffer.WriteString(fmt.Sprintf("Change is in state: %d, last active epoch %d\n", s.EpochChanger.State, s.EpochChanger.LastActiveEpoch))
+	for _, et := range s.EpochChanger.EpochTargets {
+		buffer.WriteString(fmt.Sprintf("Target Epoch %d:\n", et.Number))
+		buffer.WriteString(fmt.Sprintf("  EpochChanges: %v\n", et.EpochChanges))
+		buffer.WriteString(fmt.Sprintf("  Echos: %v\n", et.Echos))
+		buffer.WriteString(fmt.Sprintf("  Readies: %v\n", et.Readies))
+		buffer.WriteString(fmt.Sprintf("  Suspicions: %v\n", et.Suspicions))
+	}
+	buffer.WriteString("\n")
+	buffer.WriteString("=====================\n")
+	buffer.WriteString("\n")
 
 	hRule := func() {
 		for seqNo := s.LowWatermark; seqNo <= s.HighWatermark; seqNo++ {
@@ -292,37 +393,35 @@ func (s *Status) Pretty() string {
 	}
 
 	for i := len(fmt.Sprintf("%d", s.HighWatermark)); i > 0; i-- {
-		magnitude := SeqNo(math.Pow10(i - 1))
+		magnitude := math.Pow10(i - 1)
 		for seqNo := s.LowWatermark; seqNo <= s.HighWatermark; seqNo++ {
-			buffer.WriteString(fmt.Sprintf(" %d", seqNo/magnitude%10))
+			buffer.WriteString(fmt.Sprintf(" %d", seqNo/uint64(magnitude)%10))
 		}
 		buffer.WriteString("\n")
 	}
 
+	if s.LowWatermark == s.HighWatermark {
+		buffer.WriteString("=== Empty Watermarks ===\n")
+		return buffer.String()
+	}
+
 	for _, nodeStatus := range s.Nodes {
-
-		fmt.Printf("%+v\n\n\n", nodeStatus)
-
 		hRule()
 		buffer.WriteString(fmt.Sprintf("- === Node %d === \n", nodeStatus.ID))
 		for bucket, bucketStatus := range nodeStatus.BucketStatuses {
 			for seqNo := s.LowWatermark; seqNo <= s.HighWatermark; seqNo++ {
-				if seqNo == SeqNo(bucketStatus.LastCheckpoint) {
+				if seqNo == nodeStatus.LastCheckpoint {
 					buffer.WriteString("|X")
 					continue
 				}
 
-				if seqNo == SeqNo(bucketStatus.LastCommit) {
+				if seqNo == bucketStatus.LastCommit {
 					buffer.WriteString("|C")
 					continue
 				}
 
-				if seqNo == SeqNo(bucketStatus.LastPrepare) {
-					if bucketStatus.IsLeader {
-						buffer.WriteString("|Q")
-					} else {
-						buffer.WriteString("|P")
-					}
+				if seqNo == bucketStatus.LastPrepare {
+					buffer.WriteString("|P")
 					continue
 				}
 				buffer.WriteString("| ")
@@ -340,18 +439,17 @@ func (s *Status) Pretty() string {
 	buffer.WriteString("- === Buckets ===\n")
 
 	for _, bucketStatus := range s.Buckets {
+		buffer.WriteString("| ")
 		for _, state := range bucketStatus.Sequences {
 			switch state {
 			case Uninitialized:
 				buffer.WriteString("| ")
+			case Allocated:
+				buffer.WriteString("|A")
+			case Invalid:
+				buffer.WriteString("|I")
 			case Preprepared:
 				buffer.WriteString("|Q")
-			case Digested:
-				buffer.WriteString("|D")
-			case InvalidBatch:
-				buffer.WriteString("|I")
-			case Validated:
-				buffer.WriteString("|V")
 			case Prepared:
 				buffer.WriteString("|P")
 			case Committed:
@@ -369,29 +467,35 @@ func (s *Status) Pretty() string {
 	buffer.WriteString("- === Checkpoints ===\n")
 	i := 0
 	for seqNo := s.LowWatermark; seqNo <= s.HighWatermark; seqNo++ {
-		checkpoint := s.Checkpoints[i]
-		if seqNo == SeqNo(checkpoint.SeqNo) {
-			buffer.WriteString(fmt.Sprintf("|%d", checkpoint.PendingCommits))
-			i++
-			continue
+		if len(s.Checkpoints) > i {
+			checkpoint := s.Checkpoints[i]
+			if seqNo == checkpoint.SeqNo/uint64(len(s.Buckets)) {
+				buffer.WriteString(fmt.Sprintf("|%d", checkpoint.MaxAgreements))
+				i++
+				continue
+			}
 		}
 		buffer.WriteString("| ")
 	}
-	buffer.WriteString("| Pending Commits\n")
+	buffer.WriteString("| Max Agreements\n")
 	i = 0
 	for seqNo := s.LowWatermark; seqNo <= s.HighWatermark; seqNo++ {
-		checkpoint := s.Checkpoints[i]
-		if seqNo == SeqNo(s.Checkpoints[i].SeqNo) {
-			switch {
-			case checkpoint.NetQuorum && !checkpoint.LocalAgreement:
-				buffer.WriteString("|N")
-			case checkpoint.NetQuorum && checkpoint.LocalAgreement:
-				buffer.WriteString("|G")
-			default:
-				buffer.WriteString("|P")
+		if len(s.Checkpoints) > i {
+			checkpoint := s.Checkpoints[i]
+			if seqNo == s.Checkpoints[i].SeqNo/uint64(len(s.Buckets)) {
+				switch {
+				case checkpoint.NetQuorum && !checkpoint.LocalDecision:
+					buffer.WriteString("|N")
+				case checkpoint.NetQuorum && checkpoint.LocalDecision:
+					buffer.WriteString("|G")
+				case !checkpoint.NetQuorum && checkpoint.LocalDecision:
+					buffer.WriteString("|M")
+				default:
+					buffer.WriteString("|P")
+				}
+				i++
+				continue
 			}
-			i++
-			continue
 		}
 		buffer.WriteString("| ")
 	}
@@ -399,6 +503,13 @@ func (s *Status) Pretty() string {
 
 	hRule()
 	buffer.WriteString("-\n")
+
+	buffer.WriteString("\n\n Request Windows\n")
+	hRule()
+	for i, rws := range s.RequestWindows {
+		buffer.WriteString(fmt.Sprintf("\nNode %d L/H %d/%d : %v\n", i, rws.LowWatermark, rws.HighWatermark, rws.Allocated))
+		hRule()
+	}
 
 	return buffer.String()
 }

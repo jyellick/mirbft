@@ -18,8 +18,6 @@ import (
 	"fmt"
 
 	pb "github.com/IBM/mirbft/mirbftpb"
-
-	"github.com/pkg/errors"
 )
 
 var ErrStopped = fmt.Errorf("stopped at caller request")
@@ -28,11 +26,6 @@ var ErrStopped = fmt.Errorf("stopped at caller request")
 // is used to help disambiguate function signatures which accept multiple uint64
 // values with different meanings.
 type BucketID uint64
-
-// SeqNo represents a sequence number.  It is a simple alias to a uint64, but
-// is used to help disambiguate function signatures which accept multiple uint64
-// values with different meanings.
-type SeqNo uint64
 
 // EpochNo represents an epoch number.  It is a simple alias to a uint64, but
 // is used to help disambiguate function signatures which accept multiple uint64
@@ -65,31 +58,24 @@ type Node struct {
 // be deprecated, or augmented with a RestartNode or similar.  For now, this method
 // hard codes many of the parameters, but more will be exposed in the future.
 func StartNewNode(config *Config, doneC <-chan struct{}, replicas []Replica) (*Node, error) {
-	buckets := map[BucketID]NodeID{}
-	nodes := []NodeID{}
+	nodes := []uint64{}
 	for _, replica := range replicas {
-		buckets[BucketID(replica.ID)] = NodeID(replica.ID)
-		nodes = append(nodes, NodeID(replica.ID))
+		nodes = append(nodes, replica.ID)
 	}
-	if _, ok := buckets[BucketID(config.ID)]; !ok {
-		return nil, errors.Errorf("configured replica ID %d is not in the replica set", config.ID)
-	}
-	f := (len(replicas) - 1) / 3
+
 	return &Node{
 		Config:   config,
 		Replicas: replicas,
 		s: newSerializer(
 			newStateMachine(
-				&epochConfig{
-					myConfig:           config,
-					number:             0,
-					checkpointInterval: 5,
-					highWatermark:      20,
-					lowWatermark:       0,
-					f:                  f,
-					nodes:              nodes,
-					buckets:            buckets,
+				&pb.NetworkConfig{
+					Nodes:              nodes,
+					F:                  int32((len(replicas) - 1) / 3),
+					CheckpointInterval: int32(5 * len(nodes)),
+					MaxEpochLength:     uint64(len(nodes)*5*10) * 100000,
+					NumberOfBuckets:    int32(len(nodes)),
 				},
+				config,
 			),
 			doneC,
 		),
@@ -113,9 +99,15 @@ func (n *Node) Propose(ctx context.Context, data []byte) error {
 
 // Step takes authenticated messages from the other nodes in the network.  It
 // is the responsibility of the caller to ensure that the message originated from
-// the designed source.  This method only returns an error if the context ends, or
-// the node is stopped.  In the case that the node is stopped, it returns ErrStopped.
+// the designed source.  This method returns an error if the context ends, the node
+// stopped, or the message is not well formed (unknown proto fields, etc.).  In the
+// case that the node is stopped, it returns ErrStopped.
 func (n *Node) Step(ctx context.Context, source uint64, msg *pb.Msg) error {
+	err := preProcess(msg)
+	if err != nil {
+		return err
+	}
+
 	select {
 	case n.s.stepC <- step{Source: source, Msg: msg}:
 		return nil

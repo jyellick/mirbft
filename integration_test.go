@@ -19,7 +19,8 @@ var _ = Describe("Integration", func() {
 	var (
 		serializer      *serializer
 		stateMachineVal *stateMachine
-		epochConfigVal  *epochConfig
+		epochConfig     *pb.EpochConfig
+		networkConfig   *pb.NetworkConfig
 		consumerConfig  *Config
 		logger          *zap.Logger
 
@@ -49,21 +50,25 @@ var _ = Describe("Integration", func() {
 
 	Describe("F=0,N=1", func() {
 		BeforeEach(func() {
-			epochConfigVal = &epochConfig{
-				myConfig:           consumerConfig,
-				number:             3,
-				checkpointInterval: 2,
-				highWatermark:      20,
-				lowWatermark:       0,
-				f:                  0,
-				nodes:              []NodeID{0},
-				buckets:            map[BucketID]NodeID{0: 0},
+			epochConfig = &pb.EpochConfig{
+				Number:             3,
+				Leaders:            []uint64{0},
+				StartingCheckpoint: &pb.Checkpoint{},
 			}
 
-			stateMachineVal = newStateMachine(epochConfigVal)
+			networkConfig = &pb.NetworkConfig{
+				CheckpointInterval: 2,
+				F:                  0,
+				Nodes:              []uint64{0},
+				NumberOfBuckets:    1,
+				MaxEpochLength:     10,
+			}
+
+			stateMachineVal = newStateMachine(networkConfig, consumerConfig)
+			stateMachineVal.activeEpoch = newEpoch(epochConfig, stateMachineVal.checkpointTracker, stateMachineVal.requestWindows, nil, networkConfig, consumerConfig)
+			stateMachineVal.nodeMsgs[0].setActiveEpoch(stateMachineVal.activeEpoch)
 
 			serializer = newSerializer(stateMachineVal, doneC)
-
 		})
 
 		It("works from proposal through commit", func() {
@@ -72,68 +77,80 @@ var _ = Describe("Integration", func() {
 			actions := &Actions{}
 			Eventually(serializer.actionsC).Should(Receive(actions))
 			Expect(actions).To(Equal(&Actions{
-				Preprocess: []Proposal{
+				Broadcast: []*pb.Msg{
+					{
+						Type: &pb.Msg_Forward{
+							Forward: &pb.Forward{
+								RequestData: &pb.RequestData{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Data:     []byte("data"),
+								},
+							},
+						},
+					},
+				},
+				Preprocess: []*Request{
 					{
 						Source: 0,
-						Data:   []byte("data"),
+						ClientRequest: &pb.RequestData{
+							ClientId: uint64ToBytes(0),
+							ReqNo:    1,
+							Data:     []byte("data"),
+						},
 					},
 				},
 			}))
 
 			By("returning a processed version of the proposal")
 			serializer.resultsC <- ActionResults{
-				Preprocesses: []PreprocessResult{
+				Preprocessed: []*PreprocessResult{
 					{
-						Cup: 7,
-						Proposal: Proposal{
-							Source: 0,
-							Data:   []byte("data"),
+						Digest: uint64ToBytes(7),
+						RequestData: &pb.RequestData{
+							ClientId: uint64ToBytes(0),
+							ReqNo:    1,
+							Data:     []byte("data"),
 						},
 					},
 				},
 			}
+
 			Eventually(serializer.actionsC).Should(Receive(actions))
 			Expect(actions).To(Equal(&Actions{
-				Broadcast: []*pb.Msg{
+				Process: []*Batch{
 					{
-						Type: &pb.Msg_Preprepare{
-							Preprepare: &pb.Preprepare{
-								Epoch:  3,
-								Bucket: 0,
-								SeqNo:  1,
-								Batch:  [][]byte{[]byte("data")},
+						Epoch: 3,
+						SeqNo: 1,
+						Requests: []*PreprocessResult{
+							{
+								Digest: uint64ToBytes(7),
+								RequestData: &pb.RequestData{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Data:     []byte("data"),
+								},
 							},
 						},
 					},
 				},
 			}))
 
-			By("broadcasting the preprepare to myself")
-			serializer.stepC <- step{
-				Source: 0,
-				Msg:    actions.Broadcast[0],
-			}
-			Eventually(serializer.actionsC).Should(Receive(actions))
-			Expect(actions).To(Equal(&Actions{
-				Digest: []*Entry{
-					{
-						Epoch:    3,
-						BucketID: 0,
-						SeqNo:    1,
-						Batch:    [][]byte{[]byte("data")},
-					},
-				},
-			}))
-
-			By("returning a digest for the batch")
+			By("returning a the process result for the batch")
 			serializer.resultsC <- ActionResults{
-				Digests: []DigestResult{
+				Processed: []*ProcessResult{
 					{
-						Entry: &Entry{
-							Epoch:    3,
-							BucketID: 0,
-							SeqNo:    1,
-							Batch:    [][]byte{[]byte("data")},
+						Batch: &Batch{
+							Epoch: 3,
+							SeqNo: 1,
+							Requests: []*PreprocessResult{
+								{
+									RequestData: &pb.RequestData{
+										ClientId: uint64ToBytes(0),
+										Data:     []byte("data"),
+									},
+								},
+							},
 						},
 						Digest: []byte("fake-digest"),
 					},
@@ -143,14 +160,60 @@ var _ = Describe("Integration", func() {
 			Expect(actions).To(Equal(&Actions{
 				Broadcast: []*pb.Msg{
 					{
+						Type: &pb.Msg_Preprepare{
+							Preprepare: &pb.Preprepare{
+								Epoch: 3,
+								SeqNo: 1,
+								Batch: []*pb.Request{
+									{
+										ClientId: uint64ToBytes(0),
+										ReqNo:    1,
+										Digest:   uint64ToBytes(7),
+									},
+								},
+							},
+						},
+					},
+				},
+				QEntries: []*pb.QEntry{
+					{
+						Epoch:  3,
+						SeqNo:  1,
+						Digest: []byte("fake-digest"),
+						Requests: []*pb.Request{
+							{
+								ClientId: uint64ToBytes(0),
+								ReqNo:    1,
+								Digest:   uint64ToBytes(7),
+							},
+						},
+					},
+				},
+			}))
+
+			By("broadcasting the pre-prepare to myself")
+			serializer.stepC <- step{
+				Source: 0,
+				Msg:    actions.Broadcast[0],
+			}
+			Eventually(serializer.actionsC).Should(Receive(actions))
+			Expect(actions).To(Equal(&Actions{
+				Broadcast: []*pb.Msg{
+					{
 						Type: &pb.Msg_Commit{
 							Commit: &pb.Commit{
 								Epoch:  3,
-								Bucket: 0,
 								SeqNo:  1,
-								Digest: []byte(("fake-digest")),
+								Digest: []byte("fake-digest"),
 							},
 						},
+					},
+				},
+				PEntries: []*pb.PEntry{
+					{
+						Epoch:  3,
+						SeqNo:  1,
+						Digest: []byte("fake-digest"),
 					},
 				},
 			}))
@@ -162,12 +225,20 @@ var _ = Describe("Integration", func() {
 			}
 			Eventually(serializer.actionsC).Should(Receive(actions))
 			Expect(actions).To(Equal(&Actions{
-				Commit: []*Entry{
+				Commits: []*Commit{
 					{
-						Epoch:    3,
-						BucketID: 0,
-						SeqNo:    1,
-						Batch:    [][]byte{[]byte("data")},
+						QEntry: &pb.QEntry{
+							Epoch:  3,
+							SeqNo:  1,
+							Digest: []byte("fake-digest"),
+							Requests: []*pb.Request{
+								{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Digest:   uint64ToBytes(7),
+								},
+							},
+						},
 					},
 				},
 			}))
@@ -176,18 +247,26 @@ var _ = Describe("Integration", func() {
 
 	Describe("F=1,N=4", func() {
 		BeforeEach(func() {
-			epochConfigVal = &epochConfig{
-				myConfig:           consumerConfig,
-				number:             3,
-				checkpointInterval: 2,
-				highWatermark:      20,
-				lowWatermark:       0,
-				f:                  1,
-				nodes:              []NodeID{0, 1, 2, 3},
-				buckets:            map[BucketID]NodeID{0: 0, 1: 1, 2: 2, 3: 3},
+			epochConfig = &pb.EpochConfig{
+				Number:             3,
+				Leaders:            []uint64{0, 1, 2, 3},
+				StartingCheckpoint: &pb.Checkpoint{},
 			}
 
-			stateMachineVal = newStateMachine(epochConfigVal)
+			networkConfig = &pb.NetworkConfig{
+				CheckpointInterval: 5,
+				F:                  1,
+				Nodes:              []uint64{0, 1, 2, 3},
+				NumberOfBuckets:    4,
+				MaxEpochLength:     10,
+			}
+
+			stateMachineVal = newStateMachine(networkConfig, consumerConfig)
+			stateMachineVal.activeEpoch = newEpoch(epochConfig, stateMachineVal.checkpointTracker, stateMachineVal.requestWindows, nil, networkConfig, consumerConfig)
+			stateMachineVal.nodeMsgs[0].setActiveEpoch(stateMachineVal.activeEpoch)
+			stateMachineVal.nodeMsgs[1].setActiveEpoch(stateMachineVal.activeEpoch)
+			stateMachineVal.nodeMsgs[2].setActiveEpoch(stateMachineVal.activeEpoch)
+			stateMachineVal.nodeMsgs[3].setActiveEpoch(stateMachineVal.activeEpoch)
 
 			serializer = newSerializer(stateMachineVal, doneC)
 
@@ -199,43 +278,44 @@ var _ = Describe("Integration", func() {
 			actions := &Actions{}
 			Eventually(serializer.actionsC).Should(Receive(actions))
 			Expect(actions).To(Equal(&Actions{
-				Preprocess: []Proposal{
+				Broadcast: []*pb.Msg{
+					{
+						Type: &pb.Msg_Forward{
+							Forward: &pb.Forward{
+								RequestData: &pb.RequestData{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Data:     []byte("data"),
+								},
+							},
+						},
+					},
+				},
+				Preprocess: []*Request{
 					{
 						Source: 0,
-						Data:   []byte("data"),
+						ClientRequest: &pb.RequestData{
+							ClientId: uint64ToBytes(0),
+							ReqNo:    1,
+							Data:     []byte("data"),
+						},
 					},
 				},
 			}))
 
 			By("returning a processed version of the proposal")
 			serializer.resultsC <- ActionResults{
-				Preprocesses: []PreprocessResult{
+				Preprocessed: []*PreprocessResult{
 					{
-						Cup: 7,
-						Proposal: Proposal{
-							Source: 0,
-							Data:   []byte("data"),
+						Digest: uint64ToBytes(7),
+						RequestData: &pb.RequestData{
+							ClientId: uint64ToBytes(0),
+							ReqNo:    1,
+							Data:     []byte("data"),
 						},
 					},
 				},
 			}
-			Eventually(serializer.actionsC).Should(Receive(actions))
-			Expect(actions).To(Equal(&Actions{
-				Unicast: []Unicast{
-					{
-						Target: 3,
-						Msg: &pb.Msg{
-							Type: &pb.Msg_Forward{
-								Forward: &pb.Forward{
-									Epoch:  3,
-									Bucket: 3,
-									Data:   []byte("data"),
-								},
-							},
-						},
-					},
-				},
-			}))
 
 			By("faking a preprepare from the leader")
 			serializer.stepC <- step{
@@ -243,63 +323,59 @@ var _ = Describe("Integration", func() {
 				Msg: &pb.Msg{
 					Type: &pb.Msg_Preprepare{
 						Preprepare: &pb.Preprepare{
-							Epoch:  3,
-							Bucket: 3,
-							SeqNo:  1,
-							Batch:  [][]byte{[]byte("data")},
+							Epoch: 3,
+							SeqNo: 4,
+							Batch: []*pb.Request{
+								{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Digest:   uint64ToBytes(7),
+								},
+							},
 						},
 					},
 				},
 			}
 			Eventually(serializer.actionsC).Should(Receive(actions))
 			Expect(actions).To(Equal(&Actions{
-				Digest: []*Entry{
+				Process: []*Batch{
 					{
-						Epoch:    3,
-						BucketID: 3,
-						SeqNo:    1,
-						Batch:    [][]byte{[]byte("data")},
+						Source: 3,
+						Epoch:  3,
+						SeqNo:  4,
+						Requests: []*PreprocessResult{
+							{
+								Digest: uint64ToBytes(7),
+								RequestData: &pb.RequestData{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Data:     []byte("data"),
+								},
+							},
+						},
 					},
 				},
 			}))
 
 			By("returning a digest for the batch")
 			serializer.resultsC <- ActionResults{
-				Digests: []DigestResult{
+				Processed: []*ProcessResult{
 					{
-						Entry: &Entry{
-							Epoch:    3,
-							BucketID: 3,
-							SeqNo:    1,
-							Batch:    [][]byte{[]byte("data")},
+						Batch: &Batch{
+							Epoch: 3,
+							SeqNo: 4,
+							Requests: []*PreprocessResult{
+								{
+									Digest: uint64ToBytes(7),
+									RequestData: &pb.RequestData{
+										ClientId: uint64ToBytes(0),
+										ReqNo:    1,
+										Data:     []byte("data"),
+									},
+								},
+							},
 						},
 						Digest: []byte("fake-digest"),
-					},
-				},
-			}
-			Eventually(serializer.actionsC).Should(Receive(actions))
-			Expect(actions).To(Equal(&Actions{
-				Validate: []*Entry{
-					{
-						Epoch:    3,
-						BucketID: 3,
-						SeqNo:    1,
-						Batch:    [][]byte{[]byte("data")},
-					},
-				},
-			}))
-
-			By("returning a successful validatation for the batch")
-			serializer.resultsC <- ActionResults{
-				Validations: []ValidateResult{
-					{
-						Entry: &Entry{
-							Epoch:    3,
-							BucketID: 3,
-							SeqNo:    1,
-							Batch:    [][]byte{[]byte("data")},
-						},
-						Valid: true,
 					},
 				},
 			}
@@ -310,9 +386,22 @@ var _ = Describe("Integration", func() {
 						Type: &pb.Msg_Prepare{
 							Prepare: &pb.Prepare{
 								Epoch:  3,
-								Bucket: 3,
-								SeqNo:  1,
+								SeqNo:  4,
 								Digest: []byte(("fake-digest")),
+							},
+						},
+					},
+				},
+				QEntries: []*pb.QEntry{
+					{
+						Epoch:  3,
+						SeqNo:  4,
+						Digest: []byte("fake-digest"),
+						Requests: []*pb.Request{
+							{
+								ClientId: uint64ToBytes(0),
+								ReqNo:    1,
+								Digest:   uint64ToBytes(7),
 							},
 						},
 					},
@@ -337,11 +426,17 @@ var _ = Describe("Integration", func() {
 						Type: &pb.Msg_Commit{
 							Commit: &pb.Commit{
 								Epoch:  3,
-								Bucket: 3,
-								SeqNo:  1,
+								SeqNo:  4,
 								Digest: []byte(("fake-digest")),
 							},
 						},
+					},
+				},
+				PEntries: []*pb.PEntry{
+					{
+						Epoch:  3,
+						SeqNo:  4,
+						Digest: []byte("fake-digest"),
 					},
 				},
 			}))
@@ -364,12 +459,20 @@ var _ = Describe("Integration", func() {
 
 			Eventually(serializer.actionsC).Should(Receive(actions))
 			Expect(actions).To(Equal(&Actions{
-				Commit: []*Entry{
+				Commits: []*Commit{
 					{
-						Epoch:    3,
-						BucketID: 3,
-						SeqNo:    1,
-						Batch:    [][]byte{[]byte("data")},
+						QEntry: &pb.QEntry{
+							Epoch:  3,
+							SeqNo:  4,
+							Digest: []byte("fake-digest"),
+							Requests: []*pb.Request{
+								{
+									ClientId: uint64ToBytes(0),
+									ReqNo:    1,
+									Digest:   uint64ToBytes(7),
+								},
+							},
+						},
 					},
 				},
 			}))

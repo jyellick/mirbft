@@ -10,8 +10,7 @@ import (
 	"fmt"
 
 	pb "github.com/IBM/mirbft/mirbftpb"
-
-	"go.uber.org/zap"
+	// "go.uber.org/zap"
 )
 
 type step struct {
@@ -60,38 +59,45 @@ func (s *serializer) run() {
 
 	actions := &Actions{}
 	var actionsC chan<- Actions
+	var propC <-chan []byte
 	for {
 		if actions.IsEmpty() {
 			actionsC = nil
 		} else {
 			actionsC = s.actionsC
 		}
-		s.stateMachine.myConfig.Logger.Debug("serializer waiting for consumer", zap.Bool("actions", actionsC != nil))
+
+		if s.stateMachine.requestWindows[string(uint64ToBytes(s.stateMachine.myConfig.ID))].hasRoomToAllocate() {
+			propC = s.propC
+		} else {
+			propC = nil
+		}
+		// s.stateMachine.myConfig.Logger.Debug("serializer waiting for consumer", zap.Bool("actions", actionsC != nil))
 
 		select {
-		case data := <-s.propC:
-			s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "proposal"))
+		case data := <-propC:
+			// s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "proposal"))
 			actions.Append(s.stateMachine.propose(data))
 		case step := <-s.stepC:
-			s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "step"))
+			// s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "step"))
 			actions.Append(s.stateMachine.step(NodeID(step.Source), step.Msg))
 		case actionsC <- *actions:
-			s.stateMachine.myConfig.Logger.Debug("serializer sent actions")
+			// s.stateMachine.myConfig.Logger.Debug("serializer sent actions")
 			actions.Clear()
 		case results := <-s.resultsC:
-			s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "results"))
+			// s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "results"))
 			actions.Append(s.stateMachine.processResults(results))
 		case statusReq := <-s.statusC:
-			s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "status"))
+			// s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "status"))
 			select {
 			case statusReq <- s.stateMachine.status():
 			case <-s.doneC:
 			}
 		case <-s.tickC:
-			s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "tick"))
+			// s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "tick"))
 			actions.Append(s.stateMachine.tick())
 		case <-s.doneC:
-			s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "done"))
+			// s.stateMachine.myConfig.Logger.Debug("serializer receiving", zap.String("type", "done"))
 			return
 		}
 	}

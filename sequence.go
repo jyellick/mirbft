@@ -7,107 +7,153 @@ SPDX-License-Identifier: Apache-2.0
 package mirbft
 
 import (
-	pb "github.com/IBM/mirbft/mirbftpb"
+	"fmt"
 
-	"go.uber.org/zap"
+	pb "github.com/IBM/mirbft/mirbftpb"
 )
 
 type SequenceState int
 
 const (
 	Uninitialized SequenceState = iota
+	Invalid
+	Allocated
+	Ready
 	Preprepared
-	Digested
-	InvalidBatch
-	Validated
 	Prepared
 	Committed
 )
 
 type sequence struct {
-	epochConfig *epochConfig
+	owner NodeID
+	seqNo uint64
+	epoch uint64
+
+	myConfig      *Config
+	networkConfig *pb.NetworkConfig
 
 	state SequenceState
 
-	// Entry's Batch field is unset until after state >= Preprepared
-	entry *Entry
+	// qEntry is unset until after state >= Preprepared
+	qEntry *pb.QEntry
 
-	// Digest is not set until after state >= Digested
+	// batch is not set until after state >= Allocated
+	batch []*request
+
+	// digest is not set until after state >= Digested
 	digest []byte
 
 	prepares map[string]map[NodeID]struct{}
 	commits  map[string]map[NodeID]struct{}
 }
 
-func newSequence(epochConfig *epochConfig, number SeqNo, bucket BucketID) *sequence {
+func newSequence(owner NodeID, epoch, seqNo uint64, networkConfig *pb.NetworkConfig, myConfig *Config) *sequence {
 	return &sequence{
-		epochConfig: epochConfig,
-		entry: &Entry{
-			Epoch:    epochConfig.number,
-			SeqNo:    uint64(number),
-			BucketID: uint64(bucket),
-		},
-		state:    Uninitialized,
-		prepares: map[string]map[NodeID]struct{}{},
-		commits:  map[string]map[NodeID]struct{}{},
+		owner:         owner,
+		seqNo:         seqNo,
+		epoch:         epoch,
+		myConfig:      myConfig,
+		networkConfig: networkConfig,
+		state:         Uninitialized,
+		prepares:      map[string]map[NodeID]struct{}{},
+		commits:       map[string]map[NodeID]struct{}{},
 	}
 }
 
-// applyPreprepare attempts to apply a batch from a preprepare message to the state machine.
+func (s *sequence) allocateInvalid(batch []*request) *Actions {
+	// TODO, handle this case by optionally allowing the transition from
+	// Invalid to Prepared if the network agrees that this batch is valid.
+	panic("TODO unhandled")
+}
+
+// allocate reserves this sequence in this epoch for a set of requests.
 // If the state machine is not in the Uninitialized state, it returns an error.  Otherwise,
 // It transitions to Preprepared and returns a ValidationRequest message.
-func (s *sequence) applyPreprepareMsg(batch [][]byte) *Actions {
+func (s *sequence) allocate(batch []*request) *Actions {
 	if s.state != Uninitialized {
-		s.epochConfig.myConfig.Logger.Panic("illegal state for preprepare", zap.Uint64(SeqNoLog, s.entry.SeqNo), zap.Uint64(BucketIDLog, s.entry.BucketID), zap.Uint64(EpochLog, s.epochConfig.number), zap.Int("CurrentState", int(s.state)), zap.Int("Expected", int(Uninitialized)))
+		s.myConfig.Logger.Panic(fmt.Sprintf("illegal state for allocate %v", s.state))
+	}
+
+	s.state = Allocated
+	s.batch = batch
+
+	requests := make([]*PreprocessResult, len(batch))
+	for i, request := range batch {
+		requests[i] = &PreprocessResult{
+			RequestData: request.requestData,
+			Digest:      request.digest,
+		}
+		request.state = Allocated
+		request.seqNo = s.seqNo
+	}
+
+	return &Actions{
+		Process: []*Batch{
+			{
+				Source:   uint64(s.owner),
+				SeqNo:    s.seqNo,
+				Epoch:    s.epoch,
+				Requests: requests,
+			},
+		},
+	}
+}
+
+func (s *sequence) applyProcessResult(digest []byte) *Actions {
+	if s.state != Allocated {
+		s.myConfig.Logger.Panic("illegal state for digest result")
+	}
+
+	s.digest = digest
+
+	requests := make([]*pb.Request, len(s.batch))
+	for i, req := range s.batch {
+		requests[i] = &pb.Request{
+			ClientId: req.requestData.ClientId,
+			ReqNo:    req.requestData.ReqNo,
+			Digest:   req.digest,
+		}
+	}
+
+	s.qEntry = &pb.QEntry{
+		SeqNo:    s.seqNo,
+		Epoch:    s.epoch,
+		Digest:   digest,
+		Requests: requests,
+	}
+
+	for _, request := range s.batch {
+		request.state = Preprepared
 	}
 
 	s.state = Preprepared
-	s.entry.Batch = batch
 
-	return &Actions{
-		Digest: []*Entry{s.entry},
-	}
-}
-
-func (s *sequence) applyDigestResult(digest []byte) *Actions {
-	if s.state != Preprepared {
-		s.epochConfig.myConfig.Logger.Panic("illegal state for digest result", zap.Uint64(SeqNoLog, s.entry.SeqNo), zap.Uint64(BucketIDLog, s.entry.BucketID), zap.Uint64(EpochLog, s.epochConfig.number), zap.Int("CurrentState", int(s.state)), zap.Int("Expected", int(Preprepared)))
-	}
-
-	s.state = Digested
-	s.digest = digest
-
-	return &Actions{
-		Validate: []*Entry{s.entry},
-	}
-}
-
-func (s *sequence) applyValidateResult(valid bool) *Actions {
-	if s.state != Digested {
-		s.epochConfig.myConfig.Logger.Panic("illegal state for validate result", zap.Uint64(SeqNoLog, s.entry.SeqNo), zap.Uint64(BucketIDLog, s.entry.BucketID), zap.Uint64(EpochLog, s.epochConfig.number), zap.Int("CurrentState", int(s.state)), zap.Int("Expected", int(Digested)))
-	}
-
-	if !valid {
-		s.state = InvalidBatch
-		// TODO return a view change / suspect message
-		return &Actions{}
-	}
-
-	s.state = Validated
-
-	return &Actions{
-		Broadcast: []*pb.Msg{
-			{
-				Type: &pb.Msg_Prepare{
-					Prepare: &pb.Prepare{
-						SeqNo:  s.entry.SeqNo,
-						Epoch:  s.entry.Epoch,
-						Bucket: s.entry.BucketID,
-						Digest: s.digest,
-					},
+	var msg *pb.Msg
+	if uint64(s.owner) == s.myConfig.ID {
+		msg = &pb.Msg{
+			Type: &pb.Msg_Preprepare{
+				Preprepare: &pb.Preprepare{
+					SeqNo: s.seqNo,
+					Epoch: s.epoch,
+					Batch: requests, // TODO, do we want to share this with the qEntry? Concurrent marshaling is not threadsafe I think
 				},
 			},
-		},
+		}
+	} else {
+		msg = &pb.Msg{
+			Type: &pb.Msg_Prepare{
+				Prepare: &pb.Prepare{
+					SeqNo:  s.seqNo,
+					Epoch:  s.epoch,
+					Digest: s.digest,
+				},
+			},
+		}
+	}
+
+	return &Actions{
+		Broadcast: []*pb.Msg{msg},
+		QEntries:  []*pb.QEntry{s.qEntry},
 	}
 }
 
@@ -120,35 +166,45 @@ func (s *sequence) applyPrepareMsg(source NodeID, digest []byte) *Actions {
 	}
 	agreements[source] = struct{}{}
 
-	if s.state != Validated {
+	if s.state != Preprepared {
 		return &Actions{}
 	}
 
 	// Do not prepare unless we have sent our prepare as well
-	if _, ok := agreements[NodeID(s.epochConfig.myConfig.ID)]; !ok {
+	if _, ok := agreements[NodeID(s.myConfig.ID)]; !ok {
 		return &Actions{}
 	}
 
-	// We do require 2*F+1 prepares, a prepare is implicitly added for the leader
-	requiredPrepares := 2*s.epochConfig.f + 1
+	// We do require 2f+1 prepares (instead of 2f), as the preprepare
+	// for the leader will be applied as a prepare here
+	requiredPrepares := intersectionQuorum(s.networkConfig)
 
 	if len(agreements) < requiredPrepares {
 		return &Actions{}
 	}
 
 	s.state = Prepared
+	for _, request := range s.batch {
+		request.state = Prepared
+	}
 
 	return &Actions{
 		Broadcast: []*pb.Msg{
 			{
 				Type: &pb.Msg_Commit{
 					Commit: &pb.Commit{
-						SeqNo:  s.entry.SeqNo,
-						Epoch:  s.entry.Epoch,
-						Bucket: s.entry.BucketID,
+						SeqNo:  s.seqNo,
+						Epoch:  s.epoch,
 						Digest: s.digest,
 					},
 				},
+			},
+		},
+		PEntries: []*pb.PEntry{
+			{
+				Epoch:  s.epoch,
+				SeqNo:  s.seqNo,
+				Digest: s.digest,
 			},
 		},
 	}
@@ -168,19 +224,27 @@ func (s *sequence) applyCommitMsg(source NodeID, digest []byte) *Actions {
 	}
 
 	// Do not commit unless we have sent a commit
-	if _, ok := agreements[NodeID(s.epochConfig.myConfig.ID)]; !ok {
+	if _, ok := agreements[NodeID(s.myConfig.ID)]; !ok {
 		return &Actions{}
 	}
 
-	requiredCommits := 2*s.epochConfig.f + 1
+	requiredCommits := intersectionQuorum(s.networkConfig)
 
 	if len(agreements) < requiredCommits {
 		return &Actions{}
 	}
 
 	s.state = Committed
+	for _, request := range s.batch {
+		request.state = Committed
+	}
 
 	return &Actions{
-		Commit: []*Entry{s.entry},
+		Commits: []*Commit{
+			{
+				QEntry:     s.qEntry,
+				Checkpoint: s.seqNo%uint64(s.networkConfig.CheckpointInterval) == 0,
+			},
+		},
 	}
 }

@@ -8,90 +8,69 @@ package sample
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
+	"hash"
+	"runtime/debug"
 	"time"
 
 	"github.com/IBM/mirbft"
 	pb "github.com/IBM/mirbft/mirbftpb"
 )
 
-type ValidatorFunc func([]byte) error
+type ValidatorFunc func(*mirbft.Request) error
 
-func (vf ValidatorFunc) Validate(data []byte) error {
-	return vf(data)
+func (vf ValidatorFunc) Validate(request *mirbft.Request) error {
+	return vf(request)
 }
 
-type HasherFunc func([]byte) []byte
-
-func (hf HasherFunc) Hash(data []byte) []byte {
-	return hf(data)
-}
+type Hasher func() hash.Hash
 
 type Validator interface {
-	Validate(data []byte) error
+	Validate(*mirbft.Request) error
 }
 
 type Link interface {
 	Send(dest uint64, msg *pb.Msg)
 }
 
-type Hasher interface {
-	Hash([]byte) []byte
-}
-
 type Log interface {
-	Apply(*mirbft.Entry)
-	Snap() (id, attestation []byte)
-	CheckSnap(id, attestation []byte) error
+	Apply(*pb.QEntry)
+	Snap() (id []byte)
 }
 
 type SerialCommitter struct {
-	Log                  Log
-	CurrentSeqNo         uint64
-	OutstandingSeqBucket map[uint64]map[uint64]*mirbft.Entry
+	Log                    Log
+	LastCommittedSeqNo     uint64
+	OutstandingSeqNos      map[uint64]*mirbft.Commit
+	OutstandingCheckpoints map[uint64]struct{}
 }
 
-func (sc *SerialCommitter) Commit(commits []*mirbft.Entry, checkpoints []uint64) []*mirbft.CheckpointResult {
+func (sc *SerialCommitter) Commit(commits []*mirbft.Commit) []*mirbft.CheckpointResult {
 	for _, commit := range commits {
-		buckets, ok := sc.OutstandingSeqBucket[commit.SeqNo]
-		if !ok {
-			buckets = map[uint64]*mirbft.Entry{}
-			sc.OutstandingSeqBucket[commit.SeqNo] = buckets
-		}
-		buckets[commit.BucketID] = commit
+		// Note, this pattern is easy to understand, but memory inefficient.
+		// A ring buffer of size equal to the log size would produce far less
+		// garbage.
+		sc.OutstandingSeqNos[commit.QEntry.SeqNo] = commit
 	}
 
-	results := []*mirbft.CheckpointResult{}
+	var results []*mirbft.CheckpointResult
 
-	// If a checkpoint is present, then all commits prior to that seqno must be present
-	// TODO We could make commit more efficient here by passing in the number of buckets,
-	// as it stands, we are only committing at checkpoints
-	for _, checkpoint := range checkpoints {
-		for {
-			buckets := sc.OutstandingSeqBucket[sc.CurrentSeqNo]
-			for i := 0; i < len(buckets); i++ {
-				entry, ok := buckets[uint64(i)]
-				if !ok {
-					panic(fmt.Sprintf("all buckets should be populated if checkpoint requested, seqNo=%d, checkpoint=%d, bucket=%d", sc.CurrentSeqNo, checkpoint, i))
-				}
-				sc.Log.Apply(entry) // Apply the entry
-			}
-			delete(sc.OutstandingSeqBucket, sc.CurrentSeqNo)
-
-			if checkpoint == sc.CurrentSeqNo {
-				break
-			}
-
-			sc.CurrentSeqNo++
+	for currentSeqNo := sc.LastCommittedSeqNo + 1; len(sc.OutstandingSeqNos) > 0; currentSeqNo++ {
+		entry, ok := sc.OutstandingSeqNos[currentSeqNo]
+		if !ok {
+			break
 		}
+		sc.Log.Apply(entry.QEntry) // Apply the entry
+		sc.LastCommittedSeqNo = currentSeqNo
+		delete(sc.OutstandingSeqNos, currentSeqNo)
 
-		value, attestation := sc.Log.Snap()
-		results = append(results, &mirbft.CheckpointResult{
-			SeqNo:       sc.CurrentSeqNo,
-			Value:       value,
-			Attestation: attestation,
-		})
+		if entry.Checkpoint {
+			value := sc.Log.Snap()
+			results = append(results, &mirbft.CheckpointResult{
+				SeqNo: sc.LastCommittedSeqNo,
+				Value: value,
+			})
+		}
 	}
 
 	return results
@@ -110,7 +89,8 @@ type SerialProcessor struct {
 func (c *SerialProcessor) Process(actions *mirbft.Actions) *mirbft.ActionResults {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Printing state machine status")
+			fmt.Printf("\n\n!!! Recovered from crash: %v \nPrinting state machine status\n", r)
+			debug.PrintStack()
 			ctx, cancel := context.WithTimeout(context.TODO(), 50*time.Millisecond)
 			defer cancel()
 			status, err := c.Node.Status(ctx)
@@ -124,9 +104,8 @@ func (c *SerialProcessor) Process(actions *mirbft.Actions) *mirbft.ActionResults
 	}()
 
 	actionResults := &mirbft.ActionResults{
-		Preprocesses: make([]mirbft.PreprocessResult, len(actions.Preprocess)),
-		Digests:      make([]mirbft.DigestResult, len(actions.Digest)),
-		Validations:  make([]mirbft.ValidateResult, len(actions.Validate)),
+		Preprocessed: make([]*mirbft.PreprocessResult, len(actions.Preprocess)),
+		Processed:    make([]*mirbft.ProcessResult, len(actions.Process)),
 	}
 
 	for _, broadcast := range actions.Broadcast {
@@ -143,47 +122,34 @@ func (c *SerialProcessor) Process(actions *mirbft.Actions) *mirbft.ActionResults
 		c.Link.Send(unicast.Target, unicast.Msg)
 	}
 
-	for i, proposal := range actions.Preprocess {
-		hash := c.Hasher.Hash(proposal.Data)
+	for i, request := range actions.Preprocess {
+		invalid := false
+		if err := c.Validator.Validate(request); err != nil {
+			invalid = true
+		}
 
-		actionResults.Preprocesses[i] = mirbft.PreprocessResult{
-			Proposal: proposal,
-			Cup:      binary.LittleEndian.Uint64(hash[0:8]),
+		h := c.Hasher()
+
+		actionResults.Preprocessed[i] = &mirbft.PreprocessResult{
+			RequestData: request.ClientRequest,
+			Digest:      h.Sum(request.ClientRequest.Data),
+			Invalid:     invalid,
 		}
 	}
 
-	for i, entry := range actions.Digest {
-		hashes := []byte{}
-		for _, data := range entry.Batch {
-			// TODO this could be much more efficient
-			// The assumption is that the hasher has already likely
-			// computed the hashes of the data, so, if using a cached version
-			// concatenating the hashes would be cheap
-			hashes = append(hashes, c.Hasher.Hash(data)...)
+	for i, batch := range actions.Process {
+		h := c.Hasher()
+		for _, preprocessResult := range batch.Requests {
+			h.Write(preprocessResult.Digest)
 		}
 
-		actionResults.Digests[i] = mirbft.DigestResult{
-			Entry:  entry,
-			Digest: c.Hasher.Hash(hashes),
+		actionResults.Processed[i] = &mirbft.ProcessResult{
+			Batch:  batch,
+			Digest: h.Sum(nil),
 		}
 	}
 
-	for i, entry := range actions.Validate {
-		valid := true
-		for _, data := range entry.Batch {
-			if err := c.Validator.Validate(data); err != nil {
-				valid = false
-				break
-			}
-		}
-
-		actionResults.Validations[i] = mirbft.ValidateResult{
-			Entry: entry,
-			Valid: valid,
-		}
-	}
-
-	actionResults.Checkpoints = c.Committer.Commit(actions.Commit, actions.Checkpoint)
+	actionResults.Checkpoints = c.Committer.Commit(actions.Commits)
 
 	return actionResults
 }
