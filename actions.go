@@ -89,10 +89,10 @@ func (a *Actions) Length() int {
 	return len(a.Broadcast) +
 		len(a.Unicast) +
 		len(a.Preprocess) +
-		len(a.Digest) +
-		len(a.Validate) +
-		len(a.Commit) +
-		len(a.Checkpoint)
+		len(a.Process) +
+		len(a.QEntries) +
+		len(a.PEntries) +
+		len(a.Commits)
 }
 
 // Unicast is an action to send a message to a particular node.

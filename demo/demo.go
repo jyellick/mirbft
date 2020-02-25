@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/IBM/mirbft"
+	pb "github.com/IBM/mirbft/mirbftpb"
 	"github.com/IBM/mirbft/sample"
 
 	"github.com/gorilla/mux"
@@ -30,20 +31,20 @@ type SampleLog struct {
 	Position   int
 }
 
-func (sl *SampleLog) Apply(entry *mirbft.Entry) {
-	for _, data := range entry.Batch {
-		sl.TotalBytes += uint64(len(data))
-		for _, b := range data {
+func (sl *SampleLog) Apply(entry *pb.QEntry) {
+	for _, request := range entry.Requests {
+		sl.TotalBytes += uint64(len(request.Digest))
+		for _, b := range request.Digest {
 			sl.Position = (sl.Position + 1) % len(sl.LastBytes)
 			sl.LastBytes[sl.Position] = b
 		}
 	}
 }
 
-func (sl *SampleLog) Snap() ([]byte, []byte) {
+func (sl *SampleLog) Snap() []byte {
 	value := make([]byte, len(sl.LastBytes))
 	copy(value, sl.LastBytes)
-	return value, nil
+	return value
 }
 
 func (sl *SampleLog) CheckSnap(id, attestation []byte) error {
@@ -81,6 +82,9 @@ func NewDemoEnv() (*DemoEnv, error) {
 			BatchParameters: mirbft.BatchParameters{
 				CutSizeBytes: 1,
 			},
+			SuspectTicks:         4,
+			NewEpochTimeoutTicks: 8,
+			HeartbeatTicks:       2,
 		}
 
 		node, err := mirbft.StartNewNode(config, doneC, replicas)
@@ -101,14 +105,11 @@ func NewDemoEnv() (*DemoEnv, error) {
 
 		processor := &sample.SerialProcessor{
 			Node:      node,
-			Validator: sample.ValidatorFunc(func([]byte) error { return nil }),
-			Hasher: sample.HasherFunc(func(data []byte) []byte {
-				sum := sha256.Sum256(data)
-				return sum[:]
-			}),
+			Validator: sample.ValidatorFunc(func(*mirbft.Request) error { return nil }),
+			Hasher:    sha256.New,
 			Committer: &sample.SerialCommitter{
-				Log:                  sampleLog,
-				OutstandingSeqBucket: map[uint64]map[uint64]*mirbft.Entry{},
+				Log:               sampleLog,
+				OutstandingSeqNos: map[uint64]*mirbft.Commit{},
 			},
 			Link:  sample.NewFakeLink(node.Config.ID, nodes, doneC),
 			DoneC: doneC,
@@ -145,6 +146,25 @@ func (de *DemoEnv) GetNode(w http.ResponseWriter, r *http.Request) (int, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func (de *DemoEnv) HandleTick(w http.ResponseWriter, r *http.Request) {
+	id, ok := de.GetNode(w, r)
+	if !ok {
+		return
+	}
+
+	de.Mutex.Lock()
+	defer de.Mutex.Unlock()
+
+	demoNode := de.DemoNodes[id]
+
+	de.Logger.Info("handling tick request for node", zap.Int("node", id), zap.Int("length", demoNode.Actions.Length()))
+
+	demoNode.Node.Tick()
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
 }
 
 func (de *DemoEnv) HandleProcess(w http.ResponseWriter, r *http.Request) {
@@ -188,10 +208,8 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 			"broadcast":  len(demoNode.Actions.Broadcast),
 			"unicast":    len(demoNode.Actions.Unicast),
 			"preprocess": len(demoNode.Actions.Preprocess),
-			"digest":     len(demoNode.Actions.Digest),
-			"validate":   len(demoNode.Actions.Validate),
-			"commit":     len(demoNode.Actions.Commit),
-			"checkpoint": len(demoNode.Actions.Checkpoint),
+			"process":    len(demoNode.Actions.Process),
+			"commit":     len(demoNode.Actions.Commits),
 			"total":      demoNode.Actions.Length(),
 		}
 
@@ -247,6 +265,7 @@ func (de *DemoEnv) HandlePropose(w http.ResponseWriter, r *http.Request) {
 func (de *DemoEnv) Serve() {
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/node/{id}/process", de.HandleProcess)
+	router.HandleFunc("/node/{id}/tick", de.HandleTick)
 	router.HandleFunc("/status", de.HandleStatus)
 	router.HandleFunc("/node/{id}/propose", de.HandlePropose).Methods("POST")
 	de.Logger.Info("Starting HTTP server on port 10000")

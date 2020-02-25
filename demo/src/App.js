@@ -45,13 +45,13 @@ class SequenceStatusRow extends Component {
         if(sequence === 0){
           return <td key={count}></td>;
         } else if(sequence === 1){
-          return <td  key={count} style={{background:"yellow"}}>Q</td>;
-        } else if(sequence === 2){
-          return <td  key={count} style={{background:"yellow"}}>D</td>;
-        } else if(sequence === 3){
           return <td  key={count} style={{background:"red"}}>I</td>;
+        } else if(sequence === 2){
+          return <td  key={count} style={{background:"yellow"}}>A</td>;
+        } else if(sequence === 3){
+          return <td  key={count} style={{background:"yellow"}}>R</td>;
         } else if(sequence === 4){
-          return <td  key={count} style={{background:"yellow"}}>V</td>;
+          return <td  key={count} style={{background:"yellow"}}>Q</td>;
         } else if(sequence === 5){
           return <td  key={count} style={{background:"yellow"}}>P</td>;
         } else if(sequence === 6){
@@ -119,7 +119,7 @@ class SequenceCheckpointRow extends Component {
       {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
         let seq = i + this.props.lowWatermark+this.props.offset;
         let checkpoint = this.props.checkpoints.find((checkpoint) => {
-          return checkpoint.SeqNo === seq
+          return checkpoint.SeqNo / this.props.buckets === seq
         })
         if(checkpoint) {
           let colSpan = skipped+1;
@@ -165,7 +165,7 @@ class SequenceStatusBody extends Component {
       {this.props.buckets.map((bucket) => {
         return <SequenceStatusRow key={"node-"+this.props.nodeID+"-"+bucket.ID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} numBuckets={this.props.buckets.length} nodeID={this.props.nodeID} onToggle={this.props.onToggle}/>
       })}
-      <SequenceCheckpointRow offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} checkpoints={this.props.checkpoints}/>
+      <SequenceCheckpointRow offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} buckets={this.props.buckets.length} checkpoints={this.props.checkpoints}/>
     </tbody>
   }
 }
@@ -188,6 +188,8 @@ class StatusTable extends Component {
   render() {
     let lowWatermark = Math.min(...(this.props.nodes.map((i) => {return i.stateMachine.LowWatermark})))
     let highWatermark = Math.max(...(this.props.nodes.map((i) => {return i.stateMachine.HighWatermark})))
+    console.log(this.props.nodes)
+    console.log("setting low watermark to "+ lowWatermark + "and high watermark to "+highWatermark)
     if(highWatermark <= lowWatermark) {
       return null
     }
@@ -211,10 +213,13 @@ class NodeControl extends Component {
   constructor(props) {
     super(props);
     this.state = {
-      automatic: true
+      automaticProcessing: true,
+      automaticTicking: 15000 
     }
     this.processing = false
+    this.ticking = false
     this.switchProcessing = this.switchProcessing.bind(this)
+    this.switchTicking = this.switchTicking.bind(this)
   }
   
 
@@ -223,8 +228,8 @@ class NodeControl extends Component {
       return
     }
     this.processing = true;
-    let delay = this.state.automatic
-    if(this.state.automatic === "manual")  {
+    let delay = this.state.automaticProcessing
+    if(this.state.automaticProcessing === "manual")  {
       delay = 0
     }
 
@@ -260,14 +265,48 @@ class NodeControl extends Component {
     }
   }
 
+  handleTick(e) {
+    if(this.ticking === true) {
+      return
+    }
+
+    console.log("ticking "+this.props.node+" with delay "+this.state.automaticTicking)
+    this.ticking = true;
+    let delay = this.state.automaticTicking
+    if(this.state.automaticTicking === "manual")  {
+      delay = 0
+    }
+
+    setTimeout(() => {
+      fetch("/node/"+this.props.node+"/tick")
+        .then(() => {
+          this.ticking = false
+          this.props.update();
+        })
+        .catch(function(error) {
+          console.log(error);
+          alert(error);
+        });
+    }, delay)
+  }
+
   switchProcessing(e) {
-    this.setState({automatic: e.target.value})
+    this.setState({automaticProcessing: e.target.value})
+  }
+
+  switchTicking(e) {
+console.log("Got a switch ticking of value "+e.target.value)
+    this.setState({automaticTicking: e.target.value})
   }
 
 
   render() {
-    if(this.props.actions.total > 0 && this.state.automatic !== "manual") {
+    if(this.props.actions.total > 0 && this.state.automaticProcessing !== "manual") {
       this.handleProcess(null)
+    }
+
+    if(this.state.automaticTicking !== "manual") {
+      this.handleTick(null)
     }
 
     return <Card>
@@ -281,15 +320,13 @@ class NodeControl extends Component {
                 <tr><td>Broadcasts</td><td>{this.props.actions.broadcast}</td></tr>
                 <tr><td>Unicasts</td><td>{this.props.actions.unicast}</td></tr>
                 <tr><td>Preprocess</td><td>{this.props.actions.preprocess}</td></tr>
-                <tr><td>Digest</td><td>{this.props.actions.digest}</td></tr>
-                <tr><td>Validate</td><td>{this.props.actions.validate}</td></tr>
+                <tr><td>Process</td><td>{this.props.actions.process}</td></tr>
                 <tr><td>Commit</td><td>{this.props.actions.commit}</td></tr>
-                <tr><td>Checkpoint</td><td>{this.props.actions.checkpoint}</td></tr>
                 <tr style={{fontWeight:"bold"}}><td>Total</td><td>{this.props.actions.total}</td></tr>
               </tbody>
           </Table>
         <Form onSubmit={(e) => this.handleProcess(e)}>
-          <Form.Label id='auto'>Processing </Form.Label>
+          <Form.Label id='autoProcess'>Processing </Form.Label>
           <Form.Control as="select" onClick={(e) => {this.switchProcessing(e)}}>
             <option value="0">Automatic (immediate)</option>
             <option value="500">Automatic (500ms delay)</option>
@@ -298,7 +335,19 @@ class NodeControl extends Component {
             <option value="manual">Manual</option>
           </Form.Control>
           <InputGroup>
-            <Button className="m-2" disabled={this.props.actions.total === 0 || this.state.automatic === true} onClick={(e) => {this.handleProcess(e)}}> Manual Step </Button>
+            <Button className="m-2" disabled={this.props.actions.total === 0 || this.state.automaticProcessing !== "manual"} onClick={(e) => {this.handleProcess(e)}}> Manual Step </Button>
+          </InputGroup>
+        </Form>
+        <Form onSubmit={(e) => this.handleTick(e)}>
+          <Form.Label id='autoTick'>Ticking </Form.Label>
+          <Form.Control as="select" onClick={(e) => {this.switchTicking(e)}} defaultValue={this.state.automaticTicking}>
+            <option value="500">Automatic (Every 500ms)</option>
+            <option value="5000">Automatic (Every 5000ms)</option>
+            <option value="15000">Automatic (Every 15000ms)</option>
+            <option value="manual">Manual</option>
+          </Form.Control>
+          <InputGroup>
+            <Button className="m-2" disabled={this.state.automaticTicking !== "manual"} onClick={(e) => {this.handleTick(e)}}> Manual Tick </Button>
           </InputGroup>
         </Form>
         <Form onSubmit={(e) => this.handlePropose(e)}>
