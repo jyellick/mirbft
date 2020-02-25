@@ -27,20 +27,20 @@ class SequenceStatusRow extends Component {
     let count = 0;
 
     return <tr>
-      {(() => {if(this.props.bucket.ID === 0) {
+      {(() => {if(this.props.bucket.id === 0) {
         return <td rowSpan={this.props.numBuckets} style={{verticalAlign:"middle"}}>
           <Button onClick={this.props.onToggle}>Node-{this.props.nodeID} State Machine</Button>
         </td>
       }})()}
 
-      <td>Bucket-{this.props.bucket.ID}</td>
+      <td>Bucket-{this.props.bucket.id}</td>
 
       {[...Array(this.props.offset).keys()].map((i) => {
           return <td key={"offset-"+i} style={{background:"black"}}></td>;
       })}
 
       {
-        this.props.bucket.Sequences.map((sequence) => {
+        this.props.bucket.sequences.map((sequence) => {
         count++;
         if(sequence === 0){
           return <td key={count}></td>;
@@ -72,14 +72,14 @@ class SequenceMsgRow extends Component {
   render() {
     return <tr>
       {(() => {
-        if(this.props.bucket.BucketID === 0) {
+        if(this.props.bucket.bucket_id === 0) {
           return <td rowSpan={this.props.numBuckets} style={{verticalAlign:"middle"}}>
             Node-{this.props.nodeID}
           </td>
         }
       })()}
 
-      <td>Bucket-{this.props.bucket.BucketID}</td>
+      <td>Bucket-{this.props.bucket.bucket_id}</td>
 
       {[...Array(this.props.offset).keys()].map((i) => {
           return <td key={"offset-"+i} style={{background:"black"}}></td>;
@@ -88,11 +88,11 @@ class SequenceMsgRow extends Component {
       {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
         let bucket = this.props.bucket;
         let seq = i + this.props.lowWatermark;
-        if(bucket.LastCheckpoint === seq){
+        if(bucket.last_checkpoint === seq){
           return <td key={"seq-"+seq}>X</td>;
-        } else if(bucket.LastCommit === seq){
+        } else if(bucket.last_commit === seq){
            return <td key={"seq-"+seq}>C</td>;
-        } else if(bucket.LastPrepare === seq){
+        } else if(bucket.last_prepare === seq){
           return <td key={"seq-"+seq}>P</td>;
         } else {
           return <td key={"seq-"+seq}></td>;
@@ -119,17 +119,19 @@ class SequenceCheckpointRow extends Component {
       {[...Array(this.props.highWatermark - this.props.lowWatermark + 1).keys()].map((i) => {
         let seq = i + this.props.lowWatermark+this.props.offset;
         let checkpoint = this.props.checkpoints.find((checkpoint) => {
-          return checkpoint.SeqNo / this.props.buckets === seq
+          return checkpoint.seq_no / this.props.buckets === seq
         })
         if(checkpoint) {
           let colSpan = skipped+1;
           skipped = 0;
-          if(checkpoint.LocalAgreement && checkpoint.NetQuorum) {
+          if(checkpoint.local_decision && checkpoint.net_quorum) {
             return <td colSpan={colSpan} key={"seq-"+seq} style={{background:"green",textAlign:"center"}}>Local+Network</td>;
-          } else if(checkpoint.NetQuorum) {
+          } else if(checkpoint.net_quorum) {
             return <td colSpan={colSpan} key={"seq-"+seq} style={{background:"yellow",textAlign:"center"}}>Network</td>;
+          } else if(checkpoint.local_decision) {
+            return <td colSpan={colSpan} key={"seq-"+seq} style={{background:"yellow",textAlign:"center"}}>Local</td>;
           } else {
-            return <td colSpan={colSpan} key={"seq-"+seq} style={{textAlign:"center"}}>Pending {checkpoint.PendingCommits}</td>;
+            return <td colSpan={colSpan} key={"seq-"+seq} style={{textAlign:"center"}}>Max Agreements {checkpoint.max_agreements}</td>;
           }
         } else {
           skipped++
@@ -150,9 +152,9 @@ class SequenceMsgBody extends Component {
       return null
     }
     return this.props.nodes.map((node) => {
-        return <tbody key={"node-msg-tbody-"+this.props.NodeID+"-"+node.ID} style={{border:"solid black 3px"}}>
-          { node.BucketStatuses.map((bucket) => {
-          return <SequenceMsgRow key={"node-msg-row-"+this.props.nodeID+"-"+node.ID+"-"+bucket.BucketID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.BucketStatuses.length} nodeID={node.ID}/>
+        return <tbody key={"node-msg-tbody-"+this.props.node_id+"-"+node.id} style={{border:"solid black 3px"}}>
+          { node.bucket_statuses.map((bucket) => {
+          return <SequenceMsgRow key={"node-msg-row-"+this.props.nodeID+"-"+node.id+"-"+bucket.bucket_id} bucket={bucket} offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} numBuckets={node.bucket_statuses.length} nodeID={node.id}/>
         })}
      </tbody>
     })
@@ -163,7 +165,7 @@ class SequenceStatusBody extends Component {
   render() {
     return <tbody style={{border:"solid black 3px"}}>
       {this.props.buckets.map((bucket) => {
-        return <SequenceStatusRow key={"node-"+this.props.nodeID+"-"+bucket.ID} bucket={bucket} offset={this.props.offset} padding={this.props.padding} numBuckets={this.props.buckets.length} nodeID={this.props.nodeID} onToggle={this.props.onToggle}/>
+        return <SequenceStatusRow key={"node-"+this.props.nodeID+"-"+bucket.id} bucket={bucket} offset={this.props.offset} padding={this.props.padding} numBuckets={this.props.buckets.length} nodeID={this.props.nodeID} onToggle={this.props.onToggle}/>
       })}
       <SequenceCheckpointRow offset={this.props.offset} padding={this.props.padding} lowWatermark={this.props.lowWatermark} highWatermark={this.props.highWatermark} buckets={this.props.buckets.length} checkpoints={this.props.checkpoints}/>
     </tbody>
@@ -186,8 +188,8 @@ class StatusTable extends Component {
   }
 
   render() {
-    let lowWatermark = Math.min(...(this.props.nodes.map((i) => {return i.stateMachine.LowWatermark})))
-    let highWatermark = Math.max(...(this.props.nodes.map((i) => {return i.stateMachine.HighWatermark})))
+    let lowWatermark = Math.min(...(this.props.nodes.map((i) => {return i.state_machine.low_watermark})))
+    let highWatermark = Math.max(...(this.props.nodes.map((i) => {return i.state_machine.high_watermark})))
     console.log(this.props.nodes)
     console.log("setting low watermark to "+ lowWatermark + "and high watermark to "+highWatermark)
     if(highWatermark <= lowWatermark) {
@@ -197,11 +199,11 @@ class StatusTable extends Component {
     return <Table bordered size="sm">
        <SequenceHeaders lowWatermark={lowWatermark} highWatermark={highWatermark} />
        {this.props.nodes.map((node) => {
-         let offset = node.stateMachine.LowWatermark - lowWatermark;
-         let padding = highWatermark - node.stateMachine.HighWatermark;
-         return <React.Fragment key={"node-fragment"+node.ID}>
-           <SequenceStatusBody key={"node-status-"+node.ID} nodeID={node.ID} buckets={node.stateMachine.Buckets} checkpoints={node.stateMachine.Checkpoints} offset={offset} padding={padding} onToggle={this.toggleCollapse} lowWatermark={lowWatermark} highWatermark={highWatermark}/>
-           <SequenceMsgBody collapsed={this.state.collapsed} key={"node-msg-"+node.ID} nodeID={node.ID} offset={offset} padding={padding} nodes={node.stateMachine.Nodes} lowWatermark={node.stateMachine.LowWatermark} highWatermark={node.stateMachine.HighWatermark}/>
+         let offset = node.state_machine.low_watermark - lowWatermark;
+         let padding = highWatermark - node.state_machine.high_watermark;
+         return <React.Fragment key={"node-fragment"+node.id}>
+           <SequenceStatusBody key={"node-status-"+node.id} nodeID={node.id} buckets={node.state_machine.buckets} checkpoints={node.state_machine.checkpoints} offset={offset} padding={padding} onToggle={this.toggleCollapse} lowWatermark={lowWatermark} highWatermark={highWatermark}/>
+           <SequenceMsgBody collapsed={this.state.collapsed} key={"node-msg-"+node.id} nodeID={node.id} offset={offset} padding={padding} nodes={node.state_machine.nodes} lowWatermark={node.state_machine.low_watermark} highWatermark={node.state_machine.high_watermark}/>
           </React.Fragment>
        })}
     </Table>
@@ -401,7 +403,7 @@ class App extends Component {
             <Row><Col><h1>MirBFT Status</h1></Col></Row>
             <Row>
               {this.state.nodes.map((node) => {
-                return <Col key={"node-col-top-"+node.ID}><NodeControl key={"node-control-top-"+node.ID} node={node.ID} actions={node.actions} log={node.log} update={this.updateStatus}/></Col>
+                return <Col key={"node-col-top-"+node.id}><NodeControl key={"node-control-top-"+node.id} node={node.id} actions={node.actions} log={node.log} update={this.updateStatus}/></Col>
               })}
             </Row>
             <Row><Col> <StatusTable nodes={this.state.nodes}/> </Col></Row>

@@ -219,9 +219,9 @@ func (de *DemoEnv) HandleStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		nodeStatus["stateMachine"] = status
+		nodeStatus["state_machine"] = status
 
-		nodeStatus["ID"] = i
+		nodeStatus["id"] = i
 
 		nodeStatuses = append(nodeStatuses, nodeStatus)
 	}
