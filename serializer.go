@@ -80,6 +80,7 @@ func (s *serializer) run() {
 			} else {
 				s.exitErr = errors.Errorf("panic in statemachine: %v", r)
 			}
+			panic(r)
 		} else {
 			s.exitErr = ErrStopped
 		}
