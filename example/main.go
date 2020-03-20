@@ -37,9 +37,9 @@ func main() {
 		ID:                   config.ID,
 		Logger:               logger,
 		BatchParameters:      mirbft.BatchParameters{CutSizeBytes: 1},
-		HeartbeatTicks:       1,
+		HeartbeatTicks:       2,
 		SuspectTicks:         100,
-		NewEpochTimeoutTicks: 400,
+		NewEpochTimeoutTicks: 8,
 	}
 
 	doneC := make(chan struct{})
