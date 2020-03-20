@@ -26,6 +26,9 @@ type epochConfig struct {
 
 	networkConfig *pb.NetworkConfig
 
+	// leaders is the set of nodes which will act as leaders in this epoch
+	leaders []uint64
+
 	// buckets is a map from bucket ID to leader ID
 	buckets map[BucketID]NodeID
 }
@@ -109,10 +112,24 @@ func newEpoch(newEpochConfig *pb.EpochConfig, checkpointTracker *checkpointTrack
 		plannedExpiration: newEpochConfig.StartingCheckpoint.SeqNo + networkConfig.MaxEpochLength,
 		networkConfig:     networkConfig,
 		buckets:           map[BucketID]NodeID{},
+		leaders:           newEpochConfig.Leaders,
 	}
 
+	leaders := map[uint64]struct{}{}
+	for _, leader := range newEpochConfig.Leaders {
+		leaders[leader] = struct{}{}
+	}
+
+	overflowIndex := 0 // TODO, this should probably start after the last assigned node
 	for i := 0; i < int(networkConfig.NumberOfBuckets); i++ {
-		config.buckets[BucketID(i)] = NodeID(newEpochConfig.Leaders[i%len(newEpochConfig.Leaders)])
+		bucketID := BucketID(i)
+		leader := networkConfig.Nodes[(uint64(i)+newEpochConfig.Number)%uint64(len(networkConfig.Nodes))]
+		if _, ok := leaders[leader]; !ok {
+			config.buckets[bucketID] = NodeID(newEpochConfig.Leaders[overflowIndex%len(newEpochConfig.Leaders)])
+			overflowIndex++
+		} else {
+			config.buckets[bucketID] = NodeID(leader)
+		}
 	}
 
 	checkpoints := make([]*checkpoint, 0, 3)
