@@ -20,6 +20,7 @@ var _ = Describe("Recorder", func() {
 
 	BeforeEach(func() {
 		recorder = testengine.BasicRecorder(4, 4, 200)
+		recorder.NetworkConfig.MaxEpochLength = 100000 // XXX this works around a bug in the library for now
 		totalReqs = 4 * 200
 
 		var err error
@@ -53,8 +54,9 @@ var _ = Describe("Recorder", func() {
 	})
 
 	It("Executes and produces a log", func() {
-		count, err := recording.DrainClients(5 * time.Second)
+		count, err := recording.DrainClients(10 * time.Second)
 		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(Equal(38128))
 
 		fmt.Printf("Executing test required a log of %d events\n", count)
 
@@ -78,5 +80,21 @@ var _ = Describe("Recorder", func() {
 			//Expect(fmt.Sprintf("%x", node.State.Value)).To(BeEmpty())
 			Expect(fmt.Sprintf("%x", node.State.Value)).To(Equal("575b4e80673bd514cf5bc6a52f72850b27c8f1baa00669ded619c58d5116d856"))
 		}
+	})
+
+	When("A single-node network is selected", func() {
+		BeforeEach(func() {
+			recorder = testengine.BasicRecorder(1, 1, 3)
+
+			var err error
+			recording, err = recorder.Recording()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("still executes and produces a log", func() {
+			count, err := recording.DrainClients(10 * time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(count).To(Equal(26))
+		})
 	})
 })

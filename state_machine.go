@@ -109,6 +109,7 @@ func (sm *stateMachine) step(source NodeID, outerMsg *pb.Msg) *Actions {
 
 func (sm *stateMachine) drainNodeMsgs() *Actions {
 	actions := &Actions{}
+
 	for {
 		moreActions := false
 		for source, nodeMsgs := range sm.nodeMsgs {
@@ -335,15 +336,13 @@ func (sm *stateMachine) status() *Status {
 		nodes[i] = sm.nodeMsgs[nodeID].status()
 	}
 
-	checkpoints := []*CheckpointStatus{}
+	checkpoints := sm.checkpointTracker.status()
+
 	var buckets []*BucketStatus
 	var lowWatermark, highWatermark uint64
 
 	if sm.epochChanger.lastActiveEpoch != nil {
 		epoch := sm.epochChanger.lastActiveEpoch
-		for _, cw := range epoch.checkpoints {
-			checkpoints = append(checkpoints, cw.status())
-		}
 
 		buckets = epoch.status()
 
@@ -353,6 +352,11 @@ func (sm *stateMachine) status() *Status {
 			highWatermark = epoch.checkpoints[len(epoch.checkpoints)-1].end
 		} else {
 			highWatermark = lowWatermark
+		}
+	} else {
+		buckets = make([]*BucketStatus, sm.networkConfig.NumberOfBuckets)
+		for i := range buckets {
+			buckets[i] = &BucketStatus{ID: uint64(i)}
 		}
 	}
 
