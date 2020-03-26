@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"crypto/md5"
-	"encoding/binary"
 	"fmt"
-	"hash"
 	"os"
 	"time"
 
@@ -24,7 +22,9 @@ func check(err error) {
 }
 
 func main() {
-	logger := zap.NewExample()
+	// logger := zap.NewExample()
+	logger, err := zap.NewProduction()
+	check(err)
 
 	f := os.Args[1]
 	config, err := network.LoadConfig(f)
@@ -38,7 +38,7 @@ func main() {
 		Logger:               logger,
 		BatchParameters:      mirbft.BatchParameters{CutSizeBytes: 1},
 		HeartbeatTicks:       2,
-		SuspectTicks:         100,
+		SuspectTicks:         4,
 		NewEpochTimeoutTicks: 8,
 	}
 
@@ -73,12 +73,9 @@ func main() {
 	processor := &sample.SerialProcessor{
 		Link: t,
 		Validator: sample.ValidatorFunc(func(result *mirbft.Request) error {
-			if result.Source != binary.LittleEndian.Uint64(result.ClientRequest.ClientId) {
-				return fmt.Errorf("mis-matched originating replica and client id")
-			}
 			return nil
 		}),
-		Hasher: func() hash.Hash { return md5.New() },
+		Hasher: md5.New,
 		Committer: &sample.SerialCommitter{
 			Log: &network.FakeLog{
 				CommitC: commitC,
@@ -102,7 +99,7 @@ func main() {
 				node.AddResults(*results)
 			case <-node.Err():
 				_, err := node.Status(context.Background())
-				logger.Warn(err.Error())
+				logger.Warn("exited with error", zap.Error(err))
 				return
 			}
 		}
@@ -111,9 +108,17 @@ func main() {
 	go func() {
 		for {
 			select {
-			case entry := <-commitC:
+			case entry, ok := <-commitC:
+				if !ok {
+					fmt.Printf("### Commit channel closed, I guess we're done\n")
+					return
+				}
 				for _, req := range entry.Requests {
 					fmt.Printf("### Committing ReqNo: %d\n", req.ReqNo)
+					// status, _ := node.Status(context.Background())
+					// if status != nil {
+					// fmt.Println(status.Pretty())
+					// }
 				}
 			case <-doneC:
 				return
@@ -130,22 +135,19 @@ func main() {
 	//})
 	//http.ListenAndServe(":8080", nil)
 
-	if config.ID == 0 {
-		for i := 1; i < 10; i++ {
-			fmt.Printf("Proposing %d\n", i)
-			req := &pb.RequestData{
-				ClientId:  []byte("client-1"),
-				ReqNo:     uint64(i),
-				Data:      []byte("data"),
-				Signature: []byte("signature"),
-			}
-			err := node.Propose(context.TODO(), false, req)
-			check(err)
-			fmt.Printf("Proposed %d\n", i)
-			time.Sleep(10 * time.Second)
-		}
-	} else {
-		time.Sleep(time.Hour)
-	}
+	clientID := fmt.Sprintf("client-%d", config.ID)
 
+	for i := 1; true; i++ {
+		fmt.Printf("Proposing %d\n", i)
+		req := &pb.RequestData{
+			ClientId:  []byte(clientID),
+			ReqNo:     uint64(i),
+			Data:      []byte(fmt.Sprintf("data-%d", i)),
+			Signature: []byte("signature"),
+		}
+		err := node.Propose(context.TODO(), true, req)
+		check(err)
+		fmt.Printf("Proposed %d\n", i)
+		time.Sleep(5 * time.Millisecond)
+	}
 }
