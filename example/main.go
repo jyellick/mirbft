@@ -98,8 +98,9 @@ func main() {
 				results := processor.Process(&actions)
 				node.AddResults(*results)
 			case <-node.Err():
-				_, err := node.Status(context.Background())
-				logger.Warn("exited with error", zap.Error(err))
+				status, err := node.Status(context.Background())
+				fmt.Printf("exited with error: %+v\n", err)
+				fmt.Println(status.Pretty())
 				return
 			}
 		}
@@ -114,7 +115,7 @@ func main() {
 					return
 				}
 				for _, req := range entry.Requests {
-					fmt.Printf("### Committing ReqNo: %d\n", req.ReqNo)
+					fmt.Printf("### Committing %s ReqNo: %d\n", req.ClientId, req.ReqNo)
 					// status, _ := node.Status(context.Background())
 					// if status != nil {
 					// fmt.Println(status.Pretty())
@@ -137,6 +138,9 @@ func main() {
 
 	clientID := fmt.Sprintf("client-%d", config.ID)
 
+	// Give the system a chance to start up before hammering with client reqs
+	time.Sleep(5 * time.Second)
+
 	for i := 1; true; i++ {
 		fmt.Printf("Proposing %d\n", i)
 		req := &pb.RequestData{
@@ -148,6 +152,6 @@ func main() {
 		err := node.Propose(context.TODO(), true, req)
 		check(err)
 		fmt.Printf("Proposed %d\n", i)
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
